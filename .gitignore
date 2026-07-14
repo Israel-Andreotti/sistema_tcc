@@ -1,0 +1,17 @@
+# Banco de dados (gerado por database/init_db.py, não deve ir para o repositório)
+*.db
+*.db-journal
+
+# Ambiente Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Cache do Streamlit
+.streamlit/
+
+# Protótipo legado, substituído pelo sistema atual em app.py/backend_engine.py
+main.py
+categorias.txt
+ticket.xlsx
