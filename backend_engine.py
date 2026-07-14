@@ -8,6 +8,8 @@ import urgencia_engine
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "database", "tcc_tickets.db")
 
 STATUS_CONCLUIDO = "Concluído"
+STATUS_CANCELADO = "Cancelado"
+STATUS_TERMINAIS = {STATUS_CONCLUIDO, STATUS_CANCELADO}
 
 
 def _conectar() -> sqlite3.Connection:
@@ -131,13 +133,13 @@ def listar_tickets(filtro_status: str | None = None) -> list[dict]:
 
 
 def listar_tickets_ativos(filtro_status: str | None = None) -> list[dict]:
-    """Tickets que ainda não foram concluídos (aparecem no Painel)."""
-    return [t for t in listar_tickets(filtro_status) if t["status"] != STATUS_CONCLUIDO]
+    """Tickets que ainda não chegaram a um estado final (aparecem no Painel)."""
+    return [t for t in listar_tickets(filtro_status) if t["status"] not in STATUS_TERMINAIS]
 
 
 def listar_tickets_historico() -> list[dict]:
-    """Tickets já concluídos (aparecem na tela de Histórico)."""
-    return [t for t in listar_tickets() if t["status"] == STATUS_CONCLUIDO]
+    """Tickets concluídos ou cancelados (aparecem na tela de Histórico)."""
+    return [t for t in listar_tickets() if t["status"] in STATUS_TERMINAIS]
 
 
 def concluir_ticket(ticket_id: str) -> bool:

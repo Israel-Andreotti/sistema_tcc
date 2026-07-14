@@ -80,6 +80,29 @@ def _salvar_nota_e_limpar_campo(ticket_id: str, tecnico_key: str, texto_key: str
         st.toast("Não foi possível adicionar a nota.", icon="⚠️")
 
 
+def _abrir_ticket_e_limpar_formulario(opcoes_setor: dict):
+    nome = st.session_state.get("abrir_nome", "").strip()
+    ramal = st.session_state.get("abrir_ramal", "").strip()
+    sala = st.session_state.get("abrir_sala", "").strip()
+    descricao = st.session_state.get("abrir_descricao", "").strip()
+    setor_nome = st.session_state.get("abrir_setor")
+
+    if not nome or not descricao or setor_nome not in opcoes_setor:
+        return
+
+    with st.spinner("Classificando com IA e calculando urgência..."):
+        resultado = backend_engine.criar_ticket(nome, ramal, sala, opcoes_setor[setor_nome], descricao)
+
+    st.session_state["abrir_ticket_tem_resultado"] = True
+    st.session_state["abrir_ticket_resultado"] = resultado
+
+    st.session_state["abrir_nome"] = ""
+    st.session_state["abrir_ramal"] = ""
+    st.session_state["abrir_sala"] = ""
+    st.session_state["abrir_descricao"] = ""
+    st.session_state["abrir_setor"] = list(opcoes_setor.keys())[0]
+
+
 def tela_abrir_ticket():
     carregar_modelo_ia()  # garante o modelo carregado antes do primeiro ticket
 
@@ -90,38 +113,43 @@ def tela_abrir_ticket():
 
     opcoes_setor = {s["nome"]: s["id"] for s in setores}
 
-    nome = st.text_input("Seu nome")
+    st.text_input("Seu nome", key="abrir_nome")
     col_ramal, col_setor, col_sala = st.columns(3)
-    ramal = col_ramal.text_input("Ramal")
-    setor_nome = col_setor.selectbox("Setor", list(opcoes_setor.keys()))
-    sala = col_sala.text_input("Sala")
-    descricao = st.text_area("Descreva o problema", height=120, placeholder="Ex: O sistema PEP travou e não consigo acessar o prontuário do paciente...")
+    col_ramal.text_input("Ramal", key="abrir_ramal")
+    col_setor.selectbox("Setor", list(opcoes_setor.keys()), key="abrir_setor")
+    col_sala.text_input("Sala", key="abrir_sala")
+    st.text_area(
+        "Descreva o problema", height=120,
+        placeholder="Ex: O sistema PEP travou e não consigo acessar o prontuário do paciente...",
+        key="abrir_descricao",
+    )
 
-    pode_enviar = bool(nome.strip()) and bool(descricao.strip())
-    if st.button("Abrir chamado", type="primary", disabled=not pode_enviar):
-        with st.spinner("Classificando com IA e calculando urgência..."):
-            resultado = backend_engine.criar_ticket(
-                nome.strip(), ramal.strip(), sala.strip(), opcoes_setor[setor_nome], descricao.strip()
-            )
+    pode_enviar = bool(st.session_state.get("abrir_nome", "").strip()) and bool(st.session_state.get("abrir_descricao", "").strip())
+    st.button(
+        "Abrir chamado", type="primary", disabled=not pode_enviar,
+        on_click=_abrir_ticket_e_limpar_formulario, args=(opcoes_setor,),
+    )
 
+    if st.session_state.get("abrir_ticket_tem_resultado"):
+        resultado = st.session_state.get("abrir_ticket_resultado")
         if resultado is None:
             st.error("Não foi possível abrir o ticket. Verifique os dados e tente novamente.")
         else:
             st.success(f"Ticket {resultado['ticket_id']} criado com sucesso!")
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3 = st.columns(3)
             col1.metric("Categoria (IA)", resultado["categoria_ia"])
-            col2.metric("Confiança da IA", f"{resultado['confianca_ia']:.0%}")
-            col3.markdown(f"**Urgência**<br>{badge_urgencia(resultado['urgencia'])}", unsafe_allow_html=True)
-            col4.metric("SLA", f"{resultado['tempo_sla_minutos']} min")
-            st.caption(f"Score de urgência: {resultado['urgencia_score']} · Prazo limite: {resultado['data_limite']}")
+            col2.markdown(f"**Urgência**<br>{badge_urgencia(resultado['urgencia'])}", unsafe_allow_html=True)
+            col3.metric("SLA", f"{resultado['tempo_sla_minutos']} min")
+            st.caption(f"Prazo limite: {resultado['data_limite']}")
 
 
 def tela_painel():
-    status_disponiveis = [s for s in backend_engine.listar_status() if s != backend_engine.STATUS_CONCLUIDO]
+    status_para_atualizar = [s for s in backend_engine.listar_status() if s != backend_engine.STATUS_CONCLUIDO]
+    status_para_filtro = [s for s in status_para_atualizar if s != backend_engine.STATUS_CANCELADO]
     tecnicos = backend_engine.listar_tecnicos()
     opcoes_tecnico = {t["nome"]: t["id"] for t in tecnicos}
 
-    filtro = st.multiselect("Filtrar por status", status_disponiveis, default=status_disponiveis)
+    filtro = st.multiselect("Filtrar por status", status_para_filtro, default=status_para_filtro)
 
     tickets = backend_engine.listar_tickets_ativos()
     tickets = [t for t in tickets if not filtro or t["status"] in filtro]
@@ -156,7 +184,7 @@ def tela_painel():
 
             with col_status:
                 st.markdown("**Atualizar status**")
-                novo_status = st.selectbox("Novo status", status_disponiveis, key=f"status_{ticket['id']}")
+                novo_status = st.selectbox("Novo status", status_para_atualizar, key=f"status_{ticket['id']}")
                 if st.button("Atualizar", key=f"btn_status_{ticket['id']}"):
                     if backend_engine.atualizar_status(ticket["id"], novo_status):
                         st.success("Status atualizado.")
