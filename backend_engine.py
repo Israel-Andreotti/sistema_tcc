@@ -22,8 +22,83 @@ def _conectar() -> sqlite3.Connection:
 def listar_setores() -> list[dict]:
     conn = _conectar()
     try:
-        cursor = conn.execute("SELECT id, nome FROM setor ORDER BY nome")
+        cursor = conn.execute("SELECT id, nome, sigla, criticidade_peso FROM setor ORDER BY nome")
         return [dict(linha) for linha in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def listar_categorias() -> list[dict]:
+    conn = _conectar()
+    try:
+        cursor = conn.execute("SELECT id, nome, peso_base FROM categoria ORDER BY id")
+        return [dict(linha) for linha in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def criar_setor(nome: str, sigla: str, criticidade_peso: int) -> int | None:
+    conn = _conectar()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO setor (nome, sigla, criticidade_peso) VALUES (?, ?, ?)",
+            (nome, sigla, criticidade_peso),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    except sqlite3.Error:
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
+
+
+def atualizar_setor(setor_id: int, nome: str, sigla: str, criticidade_peso: int) -> bool:
+    conn = _conectar()
+    try:
+        conn.execute(
+            "UPDATE setor SET nome = ?, sigla = ?, criticidade_peso = ? WHERE id = ?",
+            (nome, sigla, criticidade_peso, setor_id),
+        )
+        conn.commit()
+        return conn.total_changes > 0
+    except sqlite3.Error:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def excluir_setor(setor_id: int) -> tuple[bool, str]:
+    """Exclui o setor (e o SLA vinculado a ele). Bloqueado se houver tickets
+    (ativos ou no histórico) apontando para esse setor."""
+    conn = _conectar()
+    try:
+        conn.execute("DELETE FROM setor WHERE id = ?", (setor_id,))
+        conn.commit()
+        return True, "Setor excluído com sucesso."
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return False, "Não é possível excluir: existem tickets vinculados a este setor. Edite o setor em vez de excluí-lo."
+    except sqlite3.Error:
+        conn.rollback()
+        return False, "Não foi possível excluir o setor."
+    finally:
+        conn.close()
+
+
+def definir_sla(categoria_id: int, setor_id: int, tempo_sla_minutos: int) -> bool:
+    conn = _conectar()
+    try:
+        conn.execute("""
+            INSERT INTO matriz_sla (categoria_id, setor_id, tempo_sla_minutos) VALUES (?, ?, ?)
+            ON CONFLICT (categoria_id, setor_id) DO UPDATE SET tempo_sla_minutos = excluded.tempo_sla_minutos
+        """, (categoria_id, setor_id, tempo_sla_minutos))
+        conn.commit()
+        return True
+    except sqlite3.Error:
+        conn.rollback()
+        return False
     finally:
         conn.close()
 
@@ -72,22 +147,24 @@ def criar_ticket(
         status_id = status_novo["id"] if status_novo else 1
 
         ticket_id = str(uuid.uuid4())
-        conn.execute("""
+        cursor = conn.execute("""
             INSERT INTO ticket (
-                id, data_criacao, solicitante_nome, solicitante_ramal, solicitante_sala,
+                id, numero, data_criacao, solicitante_nome, solicitante_ramal, solicitante_sala,
                 descricao_original, urgencia_calculada, urgencia_score, confianca_ia,
                 data_limite_sla, categoria_atribuida_id, setor_id, status_atual_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, (SELECT COALESCE(MAX(numero), 0) + 1 FROM ticket), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             ticket_id, resultado_urgencia["data_criacao"], solicitante_nome, solicitante_ramal,
             solicitante_sala, descricao_chamado, resultado_urgencia["urgencia"],
             resultado_urgencia["score"], confianca_ia, resultado_urgencia["data_limite_sla"],
             categoria["id"], setor_id, status_id,
         ))
+        numero = conn.execute("SELECT numero FROM ticket WHERE id = ?", (ticket_id,)).fetchone()["numero"]
         conn.commit()
 
         return {
             "ticket_id": ticket_id,
+            "numero": numero,
             "solicitante_nome": solicitante_nome,
             "setor": setor["nome"],
             "descricao": descricao_chamado,
@@ -109,7 +186,7 @@ def listar_tickets(filtro_status: str | None = None) -> list[dict]:
     conn = _conectar()
     try:
         query = """
-            SELECT t.id, t.data_criacao, t.solicitante_nome, t.solicitante_ramal,
+            SELECT t.id, t.numero, t.data_criacao, t.solicitante_nome, t.solicitante_ramal,
                    t.solicitante_sala, t.descricao_original, t.urgencia_calculada,
                    t.urgencia_score, t.confianca_ia, t.data_limite_sla,
                    cat.nome AS categoria, s.nome AS setor, st.nome AS status,
@@ -144,23 +221,12 @@ def listar_tickets_historico() -> list[dict]:
 
 def concluir_ticket(ticket_id: str) -> bool:
     """Marca o ticket como concluído, movendo-o para o histórico."""
-    conn = _conectar()
-    try:
-        status = conn.execute(
-            "SELECT id FROM status_ticket WHERE nome = ?", (STATUS_CONCLUIDO,)
-        ).fetchone()
-        if not status:
-            return False
-        conn.execute(
-            "UPDATE ticket SET status_atual_id = ? WHERE id = ?", (status["id"], ticket_id)
-        )
-        conn.commit()
-        return conn.total_changes > 0
-    except sqlite3.Error:
-        conn.rollback()
-        return False
-    finally:
-        conn.close()
+    return atualizar_status(ticket_id, STATUS_CONCLUIDO)
+
+
+def cancelar_ticket(ticket_id: str) -> bool:
+    """Marca o ticket como cancelado, movendo-o para o histórico."""
+    return atualizar_status(ticket_id, STATUS_CANCELADO)
 
 
 def atualizar_status(ticket_id: str, novo_status: str) -> bool:

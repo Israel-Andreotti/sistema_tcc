@@ -14,7 +14,7 @@ import sqlite3
 
 PESO_SETOR = 10
 FATOR_ESCALA = 100
-SLA_PADRAO_MINUTOS = 240  # usado quando não há regra específica na matriz_sla
+SLA_PADRAO_MINUTOS = 180  # usado quando não há regra específica na matriz_sla
 
 LIMIAR_CRITICA = 100
 LIMIAR_ALTA = 50

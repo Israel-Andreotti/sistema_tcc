@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS matriz_sla (
 -- -----------------------------------------------------
 CREATE TABLE IF NOT EXISTS ticket (
     id TEXT PRIMARY KEY, -- Armazena o UUID gerado pelo Python como string
+    numero INTEGER NOT NULL UNIQUE, -- número curto e sequencial, usado para consulta humana
     data_criacao TEXT DEFAULT (datetime('now', 'localtime')),
     solicitante_nome TEXT NOT NULL,
     solicitante_ramal TEXT,
