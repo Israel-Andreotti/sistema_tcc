@@ -1,15 +1,30 @@
+import datetime
+
 import altair as alt
 import pandas as pd
 import streamlit as st
 
 import backend_engine
 import ia_classificador
-
-st.set_page_config(page_title="Sistema de Tickets de TI", layout="wide")
+import urgencia_engine
 
 # Gate simples de protótipo — não é autenticação real, só separa a navegação
 # entre usuário comum e técnico de TI.
 SENHA_TECNICO = "tecnico123"
+
+# Session state dos widgets de login persiste entre reruns antes mesmo desses
+# widgets serem recriados — dá pra usar isso pra recolher a sidebar assim que
+# o técnico loga, sem esperar mais uma interação.
+_JA_AUTENTICADO = (
+    st.session_state.get("papel_selecionado") == "Técnico de TI"
+    and st.session_state.get("senha_tecnico") == SENHA_TECNICO
+)
+
+st.set_page_config(
+    page_title="Sistema de Tickets de TI",
+    layout="wide",
+    initial_sidebar_state="collapsed" if _JA_AUTENTICADO else "expanded",
+)
 
 # Paleta de status (fixa, nunca usada para outra coisa) — Baixa/Média/Alta/Crítica
 CORES_URGENCIA = {
@@ -23,6 +38,15 @@ ICONE_URGENCIA = {"Baixa": "🟢", "Média": "🟡", "Alta": "🟠", "Crítica":
 
 # Paleta categórica fixa (slots 1-6 da paleta de referência), uma cor por categoria
 CORES_CATEGORIA = ["#2a78d6", "#1baf7a", "#eda100", "#008300", "#4a3aa7", "#e34948"]
+
+# Paleta de criticidade de setor (1 = menos crítico ... 5 = mais crítico)
+CORES_CRITICIDADE = {
+    1: "#0ca30c",
+    2: "#2a78d6",
+    3: "#eda100",
+    4: "#ec835a",
+    5: "#d03b3b",
+}
 
 PLACEHOLDER_TECNICO = "— selecione —"
 
@@ -46,6 +70,11 @@ def carregar_modelo_ia():
 def badge_urgencia(urgencia: str) -> str:
     cor = CORES_URGENCIA.get(urgencia, "#898781")
     return f'<span style="background-color:{cor}; color:white; padding:2px 8px; border-radius:4px; font-weight:600;">{urgencia}</span>'
+
+
+def badge_criticidade(nivel: int) -> str:
+    cor = CORES_CRITICIDADE.get(nivel, "#898781")
+    return f'<span style="background-color:{cor}; color:white; padding:2px 8px; border-radius:4px; font-weight:600;">{nivel}</span>'
 
 
 def formatar_sla(minutos: int) -> str:
@@ -105,7 +134,6 @@ def _atribuir_tecnico_e_limpar(ticket_id: str, opcoes_tecnico: dict, tecnico_key
     if tecnico_escolhido not in opcoes_tecnico:
         return
     if backend_engine.atribuir_tecnico(ticket_id, opcoes_tecnico[tecnico_escolhido]):
-        st.session_state[tecnico_key] = PLACEHOLDER_TECNICO
         st.toast("Técnico atribuído. Status alterado automaticamente para 'Em Atendimento'.")
     else:
         st.toast("Não foi possível atribuir o técnico.", icon="⚠️")
@@ -205,9 +233,16 @@ def tela_painel():
                 if not opcoes_tecnico:
                     st.warning("Nenhum técnico cadastrado.")
                 else:
-                    tecnico_key = f"tecnico_{ticket['id']}"
+                    tecnico_atual = ticket["tecnico_atribuido"]
+                    # A chave inclui o técnico atual para forçar o Streamlit a recriar o
+                    # widget (e reaplicar o índice) sempre que a atribuição mudar — se a
+                    # chave fosse fixa, o valor salvo em session_state teria prioridade
+                    # sobre o índice em reruns futuros.
+                    tecnico_key = f"tecnico_{ticket['id']}_{tecnico_atual or 'none'}"
+                    opcoes_lista = [PLACEHOLDER_TECNICO] + list(opcoes_tecnico.keys())
+                    index_atual = opcoes_lista.index(tecnico_atual) if tecnico_atual in opcoes_lista else 0
                     tecnico_escolhido = st.selectbox(
-                        "Técnico", [PLACEHOLDER_TECNICO] + list(opcoes_tecnico.keys()), key=tecnico_key
+                        "Técnico", opcoes_lista, index=index_atual, key=tecnico_key
                     )
                     st.button(
                         "Atribuir", key=f"btn_atribuir_{ticket['id']}", disabled=tecnico_escolhido == PLACEHOLDER_TECNICO,
@@ -236,27 +271,6 @@ def tela_painel():
                         st.rerun()
 
             st.divider()
-            st.markdown("**Concluir ticket**")
-            confirmar_key = f"confirmar_conclusao_{ticket['id']}"
-            if not st.session_state.get(confirmar_key, False):
-                if st.button("Concluir Ticket", key=f"btn_concluir_{ticket['id']}"):
-                    st.session_state[confirmar_key] = True
-                    st.rerun()
-            else:
-                st.warning("Tem certeza que deseja concluir este ticket? Ele sairá da lista de tickets ativos e irá para o Histórico.")
-                col_sim, col_nao = st.columns(2)
-                if col_sim.button("Sim, concluir", key=f"btn_confirma_sim_{ticket['id']}", type="primary"):
-                    if backend_engine.concluir_ticket(ticket["id"]):
-                        st.session_state[confirmar_key] = False
-                        st.success("Ticket concluído e movido para o Histórico.")
-                        st.rerun()
-                    else:
-                        st.error("Não foi possível concluir o ticket.")
-                if col_nao.button("Voltar", key=f"btn_confirma_nao_{ticket['id']}"):
-                    st.session_state[confirmar_key] = False
-                    st.rerun()
-
-            st.divider()
             st.markdown("**Notas de atendimento (procedimentos adotados)**")
             renderizar_notas(ticket["id"])
 
@@ -273,6 +287,46 @@ def tela_painel():
                     on_click=_salvar_nota_e_limpar_campo, args=(ticket["id"], tecnico_key, texto_key),
                 )
 
+            st.divider()
+            btn_concluir_key = f"btn_concluir_{ticket['id']}"
+            st.markdown(
+                f"""
+                <style>
+                div.st-key-{btn_concluir_key} button {{
+                    background-color:#0ca30c;
+                    color:white;
+                    border:none;
+                }}
+                div.st-key-{btn_concluir_key} button:hover {{
+                    background-color:#098a09;
+                    color:white;
+                    border:none;
+                }}
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+            confirmar_key = f"confirmar_conclusao_{ticket['id']}"
+            if not st.session_state.get(confirmar_key, False):
+                _, col_meio, _ = st.columns([2, 1, 2])
+                with col_meio:
+                    if st.button("Concluir Ticket", key=btn_concluir_key, use_container_width=True):
+                        st.session_state[confirmar_key] = True
+                        st.rerun()
+            else:
+                st.warning("Tem certeza que deseja concluir este ticket? Ele sairá da lista de tickets ativos e irá para o Histórico.")
+                col_sim, col_nao = st.columns(2)
+                if col_sim.button("Sim, concluir", key=f"btn_confirma_sim_{ticket['id']}", type="primary"):
+                    if backend_engine.concluir_ticket(ticket["id"]):
+                        st.session_state[confirmar_key] = False
+                        st.success("Ticket concluído e movido para o Histórico.")
+                        st.rerun()
+                    else:
+                        st.error("Não foi possível concluir o ticket.")
+                if col_nao.button("Voltar", key=f"btn_confirma_nao_{ticket['id']}"):
+                    st.session_state[confirmar_key] = False
+                    st.rerun()
+
 
 def tela_historico():
     tickets = backend_engine.listar_tickets_historico()
@@ -281,15 +335,40 @@ def tela_historico():
         st.info("Nenhum ticket concluído ainda.")
         return
 
-    busca = st.text_input("Buscar por número do ticket", placeholder="Ex: 12")
-    if busca.strip():
-        tickets = [t for t in tickets if busca.strip() in str(t["numero"])]
+    setores_disponiveis = sorted({t["setor"] for t in tickets})
+    situacoes_disponiveis = sorted({t["status"] for t in tickets})
+
+    col_num, col_setor, col_situacao = st.columns(3)
+    busca_numero = col_num.text_input("Número do ticket", placeholder="Ex: 12")
+    setores_filtro = col_setor.multiselect("Setor", setores_disponiveis, placeholder="Selecione uma ou mais opções")
+    situacoes_filtro = col_situacao.multiselect("Situação", situacoes_disponiveis, placeholder="Selecione uma ou mais opções")
+
+    col_data_ini, col_data_fim = st.columns(2)
+    data_inicial = col_data_ini.date_input("Data inicial", value=None, format="DD/MM/YYYY")
+    data_final = col_data_fim.date_input("Data final", value=None, format="DD/MM/YYYY")
+
+    if busca_numero.strip():
+        tickets = [t for t in tickets if busca_numero.strip() in str(t["numero"])]
+    if setores_filtro:
+        tickets = [t for t in tickets if t["setor"] in setores_filtro]
+    if situacoes_filtro:
+        tickets = [t for t in tickets if t["status"] in situacoes_filtro]
+    if data_inicial:
+        tickets = [
+            t for t in tickets
+            if datetime.datetime.strptime(t["data_criacao"], "%Y-%m-%d %H:%M:%S").date() >= data_inicial
+        ]
+    if data_final:
+        tickets = [
+            t for t in tickets
+            if datetime.datetime.strptime(t["data_criacao"], "%Y-%m-%d %H:%M:%S").date() <= data_final
+        ]
 
     if not tickets:
-        st.info("Nenhum ticket encontrado com esse número.")
+        st.info("Nenhum ticket encontrado com os filtros selecionados.")
         return
 
-    st.write(f"{len(tickets)} ticket(s) concluído(s)")
+    st.write(f"{len(tickets)} ticket(s) encontrado(s)")
 
     for ticket in tickets:
         with st.expander(titulo_ticket(ticket)):
@@ -359,60 +438,132 @@ def tela_gerenciar_setores():
 
     st.divider()
     st.subheader("Setores cadastrados")
+
     setores = backend_engine.listar_setores()
-    df_setores = pd.DataFrame(setores)[["nome", "sigla", "criticidade_peso"]].rename(
-        columns={"nome": "Setor", "sigla": "Sigla", "criticidade_peso": "Criticidade"}
-    )
-    st.dataframe(df_setores, hide_index=True, width="stretch")
-
-    st.divider()
-    st.subheader("Editar ou excluir setor")
-
     if not setores:
         st.info("Nenhum setor cadastrado ainda.")
         return
 
-    opcoes_setor = {f"{s['nome']} ({s['sigla']})": s["id"] for s in setores}
-    rotulo_escolhido = st.selectbox("Setor", list(opcoes_setor.keys()), key="setor_selecionado_editar")
-    setor_id = opcoes_setor[rotulo_escolhido]
-    setor_atual = next(s for s in setores if s["id"] == setor_id)
+    busca_setor = st.text_input(
+        "Pesquisar setor", placeholder="Digite o nome ou a sigla do setor...", key="busca_setor",
+    )
+    if busca_setor.strip():
+        termo_busca = busca_setor.strip().lower()
+        setores_filtrados = [
+            s for s in setores if termo_busca in s["nome"].lower() or termo_busca in s["sigla"].lower()
+        ]
+    else:
+        setores_filtrados = setores
 
-    novo_nome = st.text_input("Nome", value=setor_atual["nome"], key=f"editar_nome_{setor_id}")
-    nova_sigla = st.text_input("Sigla", value=setor_atual["sigla"], key=f"editar_sigla_{setor_id}")
-    nova_criticidade = st.selectbox(
-        "Criticidade", [1, 2, 3, 4, 5], index=setor_atual["criticidade_peso"] - 1, key=f"editar_criticidade_{setor_id}"
+    if not setores_filtrados:
+        st.info("Nenhum setor encontrado para essa busca.")
+        return
+
+    categorias = backend_engine.listar_categorias()
+
+    st.markdown(
+        """
+        <style>
+        div[class*="st-key-setor_linha_"] {
+            padding: 8px 4px;
+            border-radius: 6px;
+        }
+        div[class*="st-key-setor_linha_"]:hover {
+            background-color: rgba(127, 127, 127, 0.12);
+        }
+        div[class*="st-key-setor_edit_btn_"] button {
+            opacity: 0;
+            transition: opacity 0.15s ease;
+            padding: 0.1rem 0.5rem;
+            min-height: 0;
+        }
+        div[class*="st-key-setor_linha_"]:hover div[class*="st-key-setor_edit_btn_"] button {
+            opacity: 1;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
-    col_salvar, col_excluir = st.columns(2)
+    col_h1, col_h2, col_h3, _ = st.columns([3, 1, 5, 1])
+    col_h1.markdown("**Setor**")
+    col_h2.markdown("**Criticidade**")
+    col_h3.markdown("**SLA por categoria**")
 
-    with col_salvar:
-        if st.button("Salvar alterações", key=f"btn_salvar_setor_{setor_id}"):
-            if backend_engine.atualizar_setor(setor_id, novo_nome.strip(), nova_sigla.strip().upper(), nova_criticidade):
-                st.success("Setor atualizado.")
-                st.rerun()
+    for setor in setores_filtrados:
+        setor_id = setor["id"]
+        editando_key = f"editando_setor_{setor_id}"
+        sla_atual = backend_engine.obter_sla_setor(setor_id)
+
+        with st.container(key=f"setor_linha_{setor_id}"):
+            if not st.session_state.get(editando_key, False):
+                col1, col2, col3, col4 = st.columns([3, 1, 5, 1])
+                col1.write(f"{setor['nome']} ({setor['sigla']})")
+                col2.markdown(badge_criticidade(setor["criticidade_peso"]), unsafe_allow_html=True)
+                resumo_sla = " · ".join(
+                    f"{c['nome']}: {formatar_sla(sla_atual.get(c['id'], urgencia_engine.SLA_PADRAO_MINUTOS))}"
+                    for c in categorias
+                )
+                col3.write(resumo_sla)
+                with col4:
+                    if st.button("✏️", key=f"setor_edit_btn_{setor_id}"):
+                        st.session_state[editando_key] = True
+                        st.rerun()
             else:
-                st.error("Não foi possível atualizar. O nome ou a sigla podem já estar em uso.")
+                st.markdown(f"**Editando: {setor['nome']}**")
+                novo_nome = st.text_input("Nome", value=setor["nome"], key=f"editar_nome_{setor_id}")
+                nova_sigla = st.text_input("Sigla", value=setor["sigla"], key=f"editar_sigla_{setor_id}")
+                nova_criticidade = st.selectbox(
+                    "Criticidade", [1, 2, 3, 4, 5], index=setor["criticidade_peso"] - 1,
+                    key=f"editar_criticidade_{setor_id}",
+                )
 
-    with col_excluir:
-        confirmar_exclusao_key = f"confirmar_exclusao_setor_{setor_id}"
-        if not st.session_state.get(confirmar_exclusao_key, False):
-            if st.button("Excluir setor", key=f"btn_excluir_setor_{setor_id}"):
-                st.session_state[confirmar_exclusao_key] = True
-                st.rerun()
-        else:
-            st.warning(f"Tem certeza que deseja excluir **{setor_atual['nome']}**? Essa ação não pode ser desfeita.")
-            col_sim, col_nao = st.columns(2)
-            if col_sim.button("Sim, excluir", key=f"btn_confirma_excluir_sim_{setor_id}", type="primary"):
-                sucesso, mensagem = backend_engine.excluir_setor(setor_id)
-                st.session_state[confirmar_exclusao_key] = False
-                if sucesso:
-                    st.success(mensagem)
+                st.caption("SLA por categoria (minutos)")
+                novos_sla = {}
+                cols_sla = st.columns(len(categorias))
+                for col, categoria in zip(cols_sla, categorias):
+                    valor_atual = sla_atual.get(categoria["id"], urgencia_engine.SLA_PADRAO_MINUTOS)
+                    novos_sla[categoria["id"]] = col.number_input(
+                        categoria["nome"], min_value=5, max_value=2880, step=5, value=valor_atual,
+                        key=f"editar_sla_{setor_id}_{categoria['id']}",
+                    )
+
+                col_salvar, col_cancelar = st.columns(2)
+                if col_salvar.button("Salvar", key=f"btn_salvar_setor_{setor_id}", type="primary"):
+                    if backend_engine.atualizar_setor(setor_id, novo_nome.strip(), nova_sigla.strip().upper(), nova_criticidade):
+                        for categoria_id, minutos in novos_sla.items():
+                            backend_engine.definir_sla(categoria_id, setor_id, int(minutos))
+                        st.session_state[editando_key] = False
+                        st.success("Setor atualizado. Os novos tickets já vão usar os valores atualizados.")
+                        st.rerun()
+                    else:
+                        st.error("Não foi possível atualizar. O nome ou a sigla podem já estar em uso.")
+                if col_cancelar.button("Cancelar", key=f"btn_cancelar_setor_{setor_id}"):
+                    st.session_state[editando_key] = False
+                    st.rerun()
+
+                confirmar_exclusao_key = f"confirmar_exclusao_setor_{setor_id}"
+                if not st.session_state.get(confirmar_exclusao_key, False):
+                    if st.button("Excluir setor", key=f"btn_excluir_setor_{setor_id}"):
+                        st.session_state[confirmar_exclusao_key] = True
+                        st.rerun()
                 else:
-                    st.error(mensagem)
-                st.rerun()
-            if col_nao.button("Voltar", key=f"btn_confirma_excluir_nao_{setor_id}"):
-                st.session_state[confirmar_exclusao_key] = False
-                st.rerun()
+                    st.warning(f"Tem certeza que deseja excluir **{setor['nome']}**? Essa ação não pode ser desfeita.")
+                    col_sim, col_nao = st.columns(2)
+                    if col_sim.button("Sim, excluir", key=f"btn_confirma_excluir_sim_{setor_id}", type="primary"):
+                        sucesso, mensagem = backend_engine.excluir_setor(setor_id)
+                        st.session_state[confirmar_exclusao_key] = False
+                        if sucesso:
+                            st.session_state[editando_key] = False
+                            st.success(mensagem)
+                        else:
+                            st.error(mensagem)
+                        st.rerun()
+                    if col_nao.button("Voltar", key=f"btn_confirma_excluir_nao_{setor_id}"):
+                        st.session_state[confirmar_exclusao_key] = False
+                        st.rerun()
+
+        st.divider()
 
 
 def tela_dashboard():
@@ -463,13 +614,14 @@ def tela_dashboard():
 
 st.title("Sistema de Tickets de TI")
 
-papel = st.sidebar.radio("Acessar como", ["Usuário Comum", "Técnico de TI"])
+papel = st.sidebar.radio("Acessar como", ["Usuário Comum", "Técnico de TI"], key="papel_selecionado")
 
 if papel == "Usuário Comum":
     st.header("Abrir Ticket")
     tela_abrir_ticket()
 else:
-    senha = st.sidebar.text_input("Senha de técnico", type="password")
+    senha = st.sidebar.text_input("Senha de técnico", type="password", key="senha_tecnico")
+    st.sidebar.button("Entrar")
     if not senha:
         st.info("Digite a senha de técnico na barra lateral para acessar o painel.")
     elif senha != SENHA_TECNICO:

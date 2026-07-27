@@ -87,6 +87,18 @@ def excluir_setor(setor_id: int) -> tuple[bool, str]:
         conn.close()
 
 
+def obter_sla_setor(setor_id: int) -> dict:
+    conn = _conectar()
+    try:
+        cursor = conn.execute(
+            "SELECT categoria_id, tempo_sla_minutos FROM matriz_sla WHERE setor_id = ?",
+            (setor_id,),
+        )
+        return {linha["categoria_id"]: linha["tempo_sla_minutos"] for linha in cursor.fetchall()}
+    finally:
+        conn.close()
+
+
 def definir_sla(categoria_id: int, setor_id: int, tempo_sla_minutos: int) -> bool:
     conn = _conectar()
     try:
