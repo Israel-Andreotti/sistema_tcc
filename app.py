@@ -150,6 +150,10 @@ def _atribuir_tecnico_e_limpar(ticket_id: str, opcoes_tecnico: dict, tecnico_key
         st.toast("Não foi possível atribuir o técnico.", icon="⚠️")
 
 
+def _sanitizar_ramal():
+    st.session_state["abrir_ramal"] = "".join(c for c in st.session_state.get("abrir_ramal", "") if c.isdigit())
+
+
 def _abrir_ticket_e_limpar_formulario(opcoes_setor: dict):
     nome = st.session_state.get("abrir_nome", "").strip()
     ramal = st.session_state.get("abrir_ramal", "").strip()
@@ -185,7 +189,7 @@ def tela_abrir_ticket():
 
     st.text_input("Seu nome", key="abrir_nome")
     col_ramal, col_setor, col_sala = st.columns(3)
-    col_ramal.number_input("Ramal", key="abrir_ramal")
+    col_ramal.text_input("Ramal", key="abrir_ramal", on_change=_sanitizar_ramal)
     col_setor.selectbox("Setor", list(opcoes_setor.keys()), key="abrir_setor")
     col_sala.text_input("Sala", key="abrir_sala")
     st.text_area(
