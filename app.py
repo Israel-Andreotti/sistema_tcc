@@ -185,7 +185,7 @@ def tela_abrir_ticket():
 
     st.text_input("Seu nome", key="abrir_nome")
     col_ramal, col_setor, col_sala = st.columns(3)
-    col_ramal.text_input("Ramal", key="abrir_ramal")
+    col_ramal.number_input("Ramal", key="abrir_ramal")
     col_setor.selectbox("Setor", list(opcoes_setor.keys()), key="abrir_setor")
     col_sala.text_input("Sala", key="abrir_sala")
     st.text_area(
@@ -213,6 +213,7 @@ def tela_abrir_ticket():
             st.caption(f"Prazo limite: {resultado['data_limite']}")
 
 
+@st.fragment(run_every="15s")
 def tela_painel():
     status_para_filtro = [
         s for s in backend_engine.listar_status()
