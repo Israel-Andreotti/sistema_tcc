@@ -1,4 +1,5 @@
 import os
+import threading
 import uuid
 
 import libsql_client
@@ -72,15 +73,33 @@ class _Conexao:
         pass
 
     def close(self):
-        self._client.close()
+        # O client HTTP é compartilhado entre chamadas (ver _obter_client) — não
+        # faz sentido fechar a conexão a cada função, só reseta o estado local.
+        pass
+
+
+_client: libsql_client.ClientSync | None = None
+_client_lock = threading.Lock()
+
+
+def _obter_client() -> libsql_client.ClientSync:
+    """Reaproveita um único client HTTP entre todas as chamadas do processo,
+    em vez de abrir/fechar uma conexão nova a cada função — o ClientSync é
+    thread-safe (roda seu próprio loop assíncrono num thread dedicado), o que
+    é seguro mesmo com várias sessões do Streamlit chamando em paralelo."""
+    global _client
+    if _client is None:
+        with _client_lock:
+            if _client is None:
+                _client = libsql_client.create_client_sync(
+                    os.environ["TURSO_DATABASE_URL"],
+                    auth_token=os.environ["TURSO_AUTH_TOKEN"],
+                )
+    return _client
 
 
 def _conectar() -> _Conexao:
-    client = libsql_client.create_client_sync(
-        os.environ["TURSO_DATABASE_URL"],
-        auth_token=os.environ["TURSO_AUTH_TOKEN"],
-    )
-    return _Conexao(client)
+    return _Conexao(_obter_client())
 
 
 def listar_setores() -> list[dict]:
@@ -266,21 +285,24 @@ def criar_ticket(
         conn.close()
 
 
+_TICKETS_QUERY_BASE = """
+    SELECT t.id, t.numero, t.data_criacao, t.solicitante_nome, t.solicitante_ramal,
+           t.solicitante_sala, t.descricao_original, t.urgencia_calculada,
+           t.urgencia_score, t.confianca_ia, t.data_limite_sla,
+           cat.nome AS categoria, s.nome AS setor, st.nome AS status,
+           tec.nome AS tecnico_atribuido
+    FROM ticket t
+    JOIN categoria cat ON t.categoria_atribuida_id = cat.id
+    JOIN setor s ON t.setor_id = s.id
+    JOIN status_ticket st ON t.status_atual_id = st.id
+    LEFT JOIN tecnico tec ON t.tecnico_atribuido_id = tec.id
+"""
+
+
 def listar_tickets(filtro_status: str | None = None) -> list[dict]:
     conn = _conectar()
     try:
-        query = """
-            SELECT t.id, t.numero, t.data_criacao, t.solicitante_nome, t.solicitante_ramal,
-                   t.solicitante_sala, t.descricao_original, t.urgencia_calculada,
-                   t.urgencia_score, t.confianca_ia, t.data_limite_sla,
-                   cat.nome AS categoria, s.nome AS setor, st.nome AS status,
-                   tec.nome AS tecnico_atribuido
-            FROM ticket t
-            JOIN categoria cat ON t.categoria_atribuida_id = cat.id
-            JOIN setor s ON t.setor_id = s.id
-            JOIN status_ticket st ON t.status_atual_id = st.id
-            LEFT JOIN tecnico tec ON t.tecnico_atribuido_id = tec.id
-        """
+        query = _TICKETS_QUERY_BASE
         parametros = ()
         if filtro_status:
             query += " WHERE st.nome = ?"
@@ -293,14 +315,31 @@ def listar_tickets(filtro_status: str | None = None) -> list[dict]:
         conn.close()
 
 
-def listar_tickets_ativos(filtro_status: str | None = None) -> list[dict]:
+def _listar_tickets_por_situacao(incluir_terminais: bool) -> list[dict]:
+    """Filtra ativos/histórico direto no SQL (WHERE st.nome IN/NOT IN), em vez
+    de buscar a tabela inteira e descartar linha em Python — evita trafegar
+    ticket concluído/cancelado toda vez que o Painel (que reconsulta sozinho
+    a cada 15s) só quer os ativos, por exemplo."""
+    conn = _conectar()
+    try:
+        status = tuple(STATUS_TERMINAIS)
+        operador = "IN" if incluir_terminais else "NOT IN"
+        placeholders = ", ".join("?" for _ in status)
+        query = f"{_TICKETS_QUERY_BASE} WHERE st.nome {operador} ({placeholders}) ORDER BY t.data_criacao DESC"
+        cursor = conn.execute(query, status)
+        return [dict(linha) for linha in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def listar_tickets_ativos() -> list[dict]:
     """Tickets que ainda não chegaram a um estado final (aparecem no Painel)."""
-    return [t for t in listar_tickets(filtro_status) if t["status"] not in STATUS_TERMINAIS]
+    return _listar_tickets_por_situacao(incluir_terminais=False)
 
 
 def listar_tickets_historico() -> list[dict]:
     """Tickets concluídos ou cancelados (aparecem na tela de Histórico)."""
-    return [t for t in listar_tickets() if t["status"] in STATUS_TERMINAIS]
+    return _listar_tickets_por_situacao(incluir_terminais=True)
 
 
 def concluir_ticket(ticket_id: str) -> bool:
