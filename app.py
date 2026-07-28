@@ -151,7 +151,9 @@ def _atribuir_tecnico_e_limpar(ticket_id: str, opcoes_tecnico: dict, tecnico_key
 
 
 def _sanitizar_ramal():
-    st.session_state["abrir_ramal"] = "".join(c for c in st.session_state.get("abrir_ramal", "") if c.isdigit())
+    valor_digitado = st.session_state.get("abrir_ramal", "")
+    st.session_state["ramal_tem_letra"] = any(not c.isdigit() for c in valor_digitado)
+    st.session_state["abrir_ramal"] = "".join(c for c in valor_digitado if c.isdigit())
 
 
 def _abrir_ticket_e_limpar_formulario(opcoes_setor: dict):
@@ -172,6 +174,7 @@ def _abrir_ticket_e_limpar_formulario(opcoes_setor: dict):
 
     st.session_state["abrir_nome"] = ""
     st.session_state["abrir_ramal"] = ""
+    st.session_state["ramal_tem_letra"] = False
     st.session_state["abrir_sala"] = ""
     st.session_state["abrir_descricao"] = ""
     st.session_state["abrir_setor"] = list(opcoes_setor.keys())[0]
@@ -190,6 +193,8 @@ def tela_abrir_ticket():
     st.text_input("Seu nome", key="abrir_nome")
     col_ramal, col_setor, col_sala = st.columns(3)
     col_ramal.text_input("Ramal", key="abrir_ramal", on_change=_sanitizar_ramal)
+    if st.session_state.get("ramal_tem_letra"):
+        col_ramal.markdown(":red[Só é permitido digitar números no campo Ramal.]")
     col_setor.selectbox("Setor", list(opcoes_setor.keys()), key="abrir_setor")
     col_sala.text_input("Sala", key="abrir_sala")
     st.text_area(
