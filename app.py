@@ -1,4 +1,5 @@
 import datetime
+import os
 
 import altair as alt
 import pandas as pd
@@ -7,6 +8,16 @@ import streamlit as st
 import backend_engine
 import ia_classificador
 import urgencia_engine
+
+# Credenciais do Turso ficam em .streamlit/secrets.toml (local) ou no painel de
+# Secrets do Streamlit Cloud (produção); espelhadas pra variável de ambiente
+# porque é isso que backend_engine.py lê.
+try:
+    for _chave in ("TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN"):
+        if _chave not in os.environ and _chave in st.secrets:
+            os.environ[_chave] = st.secrets[_chave]
+except Exception:
+    pass
 
 # Gate simples de protótipo — não é autenticação real, só separa a navegação
 # entre usuário comum e técnico de TI.

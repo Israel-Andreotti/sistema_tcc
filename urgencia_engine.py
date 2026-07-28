@@ -10,7 +10,6 @@ da fórmula com a matriz de urgência definida manualmente no seed original.
 """
 
 import datetime
-import sqlite3
 
 PESO_SETOR = 10
 FATOR_ESCALA = 100
@@ -31,8 +30,7 @@ def _classificar_score(score: float) -> str:
     return "Baixa"
 
 
-def calcular_urgencia(categoria_id: int, setor_id: int, conn: sqlite3.Connection) -> dict:
-    conn.row_factory = sqlite3.Row
+def calcular_urgencia(categoria_id: int, setor_id: int, conn) -> dict:
     cursor = conn.cursor()
 
     cursor.execute("SELECT peso_base FROM categoria WHERE id = ?", (categoria_id,))

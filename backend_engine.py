@@ -1,22 +1,86 @@
 import os
-import sqlite3
 import uuid
+
+import libsql_client
 
 import ia_classificador
 import urgencia_engine
-
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "database", "tcc_tickets.db")
 
 STATUS_CONCLUIDO = "Concluído"
 STATUS_CANCELADO = "Cancelado"
 STATUS_TERMINAIS = {STATUS_CONCLUIDO, STATUS_CANCELADO}
 
 
-def _conectar() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
+class _Linha:
+    """Combina acesso por índice e por nome (como sqlite3.Row), pra manter
+    compatível o resto do módulo, que usa tanto dict(linha) quanto
+    linha[0]/linha["campo"]."""
+    __slots__ = ("_row", "_colunas")
+
+    def __init__(self, row, colunas):
+        self._row = row
+        self._colunas = colunas
+
+    def __getitem__(self, chave):
+        return self._row[chave]
+
+    def keys(self):
+        return self._colunas
+
+
+class _Cursor:
+    """Imita o pedaço da API de sqlite3.Cursor usado neste projeto."""
+
+    def __init__(self, conexao: "_Conexao"):
+        self._conexao = conexao
+        self._linhas: list[_Linha] = []
+        self.lastrowid = None
+
+    def execute(self, sql: str, parametros=()) -> "_Cursor":
+        resultado = self._conexao._client.execute(sql, tuple(parametros))
+        self._conexao.total_changes += max(resultado.rows_affected, 0)
+        self._linhas = [_Linha(linha, resultado.columns) for linha in resultado.rows]
+        self.lastrowid = resultado.last_insert_rowid
+        return self
+
+    def fetchone(self):
+        return self._linhas[0] if self._linhas else None
+
+    def fetchall(self):
+        return self._linhas
+
+
+class _Conexao:
+    """Imita o pedaço da API de sqlite3.Connection usado neste projeto, por
+    cima do cliente HTTP do Turso — assim o resto do backend_engine.py (e
+    ia_classificador.py/urgencia_engine.py) não precisou mudar."""
+
+    def __init__(self, client):
+        self._client = client
+        self.total_changes = 0
+
+    def execute(self, sql: str, parametros=()) -> _Cursor:
+        return _Cursor(self).execute(sql, parametros)
+
+    def cursor(self) -> _Cursor:
+        return _Cursor(self)
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        self._client.close()
+
+
+def _conectar() -> _Conexao:
+    client = libsql_client.create_client_sync(
+        os.environ["TURSO_DATABASE_URL"],
+        auth_token=os.environ["TURSO_AUTH_TOKEN"],
+    )
+    return _Conexao(client)
 
 
 def listar_setores() -> list[dict]:
@@ -46,7 +110,7 @@ def criar_setor(nome: str, sigla: str, criticidade_peso: int) -> int | None:
         )
         conn.commit()
         return cursor.lastrowid
-    except sqlite3.Error:
+    except libsql_client.LibsqlError:
         conn.rollback()
         return None
     finally:
@@ -62,7 +126,7 @@ def atualizar_setor(setor_id: int, nome: str, sigla: str, criticidade_peso: int)
         )
         conn.commit()
         return conn.total_changes > 0
-    except sqlite3.Error:
+    except libsql_client.LibsqlError:
         conn.rollback()
         return False
     finally:
@@ -71,16 +135,24 @@ def atualizar_setor(setor_id: int, nome: str, sigla: str, criticidade_peso: int)
 
 def excluir_setor(setor_id: int) -> tuple[bool, str]:
     """Exclui o setor (e o SLA vinculado a ele). Bloqueado se houver tickets
-    (ativos ou no histórico) apontando para esse setor."""
+    (ativos ou no histórico) apontando para esse setor.
+
+    A checagem é feita explicitamente aqui (em vez de confiar em ON DELETE
+    RESTRICT do schema) porque o Turso, via HTTP, não garante que o PRAGMA
+    foreign_keys=ON de uma chamada valha pras chamadas seguintes."""
     conn = _conectar()
     try:
+        tem_ticket = conn.execute(
+            "SELECT 1 FROM ticket WHERE setor_id = ? LIMIT 1", (setor_id,)
+        ).fetchone()
+        if tem_ticket:
+            return False, "Não é possível excluir: existem tickets vinculados a este setor. Edite o setor em vez de excluí-lo."
+
+        conn.execute("DELETE FROM matriz_sla WHERE setor_id = ?", (setor_id,))
         conn.execute("DELETE FROM setor WHERE id = ?", (setor_id,))
         conn.commit()
         return True, "Setor excluído com sucesso."
-    except sqlite3.IntegrityError:
-        conn.rollback()
-        return False, "Não é possível excluir: existem tickets vinculados a este setor. Edite o setor em vez de excluí-lo."
-    except sqlite3.Error:
+    except libsql_client.LibsqlError:
         conn.rollback()
         return False, "Não foi possível excluir o setor."
     finally:
@@ -108,7 +180,7 @@ def definir_sla(categoria_id: int, setor_id: int, tempo_sla_minutos: int) -> boo
         """, (categoria_id, setor_id, tempo_sla_minutos))
         conn.commit()
         return True
-    except sqlite3.Error:
+    except libsql_client.LibsqlError:
         conn.rollback()
         return False
     finally:
@@ -187,7 +259,7 @@ def criar_ticket(
             "tempo_sla_minutos": resultado_urgencia["tempo_sla_minutos"],
             "data_limite": resultado_urgencia["data_limite_sla"],
         }
-    except sqlite3.Error:
+    except libsql_client.LibsqlError:
         conn.rollback()
         return None
     finally:
@@ -252,7 +324,7 @@ def atualizar_status(ticket_id: str, novo_status: str) -> bool:
         )
         conn.commit()
         return conn.total_changes > 0
-    except sqlite3.Error:
+    except libsql_client.LibsqlError:
         conn.rollback()
         return False
     finally:
@@ -280,7 +352,7 @@ def adicionar_nota(ticket_id: str, tecnico_nome: str, texto: str) -> bool:
         )
         conn.commit()
         return True
-    except sqlite3.Error:
+    except libsql_client.LibsqlError:
         conn.rollback()
         return False
     finally:
@@ -304,7 +376,7 @@ def atribuir_tecnico(ticket_id: str, tecnico_id: int) -> bool:
         )
         conn.commit()
         return conn.total_changes > 0
-    except sqlite3.Error:
+    except libsql_client.LibsqlError:
         conn.rollback()
         return False
     finally:

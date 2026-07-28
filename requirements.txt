@@ -3,3 +3,4 @@ pandas
 altair
 transformers
 torch
+libsql-client
