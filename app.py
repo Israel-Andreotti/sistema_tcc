@@ -156,6 +156,11 @@ def _fazer_login_tecnico():
         st.session_state["tecnico_logado"] = tecnico
         st.session_state["login_senha"] = ""
         st.session_state["erro_login"] = False
+        # tela_abrir_ticket() é reaproveitada na aba "Abrir Ticket" do técnico
+        # logado — sem isso, a confirmação de um ticket aberto como usuário
+        # comum antes do login continuaria aparecendo lá.
+        st.session_state.pop("abrir_ticket_tem_resultado", None)
+        st.session_state.pop("abrir_ticket_resultado", None)
     else:
         st.session_state["erro_login"] = True
 
