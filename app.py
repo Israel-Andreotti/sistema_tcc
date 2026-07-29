@@ -81,6 +81,12 @@ def badge_criticidade(nivel: int) -> str:
     return f'<span style="background-color:{cor}; color:white; padding:2px 8px; border-radius:4px; font-weight:600;">{nivel}</span>'
 
 
+def badge_tecnico(tecnico_atribuido: str | None) -> str:
+    if tecnico_atribuido:
+        return f'<span style="background-color:#2a78d6; color:white; padding:2px 8px; border-radius:4px; font-weight:600;">{tecnico_atribuido}</span>'
+    return '<span style="background-color:#898781; color:white; padding:2px 8px; border-radius:4px; font-weight:600;">Não atribuído</span>'
+
+
 def formatar_sla(minutos: int) -> str:
     if minutos < 60:
         return f"{minutos} min"
@@ -90,7 +96,10 @@ def formatar_sla(minutos: int) -> str:
 
 def titulo_ticket(ticket: dict) -> str:
     icone = ICONE_URGENCIA.get(ticket["urgencia_calculada"], "⚪")
-    tecnico_label = ticket["tecnico_atribuido"] or "não atribuído"
+    if ticket["tecnico_atribuido"]:
+        tecnico_label = f"👤 {ticket['tecnico_atribuido']}"
+    else:
+        tecnico_label = "❗**não atribuído**"
     return (f"{icone} #{ticket['numero']} · {ticket['solicitante_nome']} · {ticket['categoria']} · {ticket['setor']} "
             f"· {ticket['status']} · Téc.: {tecnico_label}")
 
@@ -103,6 +112,7 @@ def renderizar_info_ticket(ticket: dict):
         st.markdown(f"**Ramal:** {ticket['solicitante_ramal'] or '-'}")
         st.markdown(f"**Sala:** {ticket['solicitante_sala'] or '-'}")
         st.markdown(f"**Setor:** {ticket['setor']}")
+        st.markdown(f"**Técnico:** {badge_tecnico(ticket['tecnico_atribuido'])}", unsafe_allow_html=True)
     with col_info2:
         st.markdown(f"**Categoria (IA):** {ticket['categoria']} ({ticket['confianca_ia']:.0%} confiança)")
         st.markdown(f"**Urgência:** {badge_urgencia(ticket['urgencia_calculada'])} (score {ticket['urgencia_score']})",
@@ -256,8 +266,22 @@ def tela_painel():
 
     st.write(f"{len(tickets)} ticket(s) encontrado(s) — clique em um ticket para ver detalhes e agir sobre ele.")
 
+    st.markdown(
+        """
+        <style>
+        div[class*="st-key-ticket_pendente_"] {
+            background-color: rgba(208, 59, 59, 0.10);
+            border-radius: 8px;
+            padding: 4px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     for ticket in tickets:
-        with st.expander(titulo_ticket(ticket)):
+        estado = "pendente" if not ticket["tecnico_atribuido"] else "atribuido"
+        with st.container(key=f"ticket_{estado}_{ticket['id']}"), st.expander(titulo_ticket(ticket)):
             renderizar_info_ticket(ticket)
 
             st.divider()
