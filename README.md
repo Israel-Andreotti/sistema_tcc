@@ -22,6 +22,3 @@ Turso, banco remoto compatível com libSQL).
 pip install -r requirements.txt
 streamlit run app.py
 ```
-
-Credenciais do Turso (`TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`) ficam em
-`.streamlit/secrets.toml` (não versionado) ou nas variáveis de ambiente.
