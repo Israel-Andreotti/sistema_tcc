@@ -1,0 +1,11 @@
+.git
+.streamlit
+__pycache__
+*.pyc
+*.db
+*.db-journal
+.venv
+venv
+ticket.xlsx
+main.py
+categorias.txt
