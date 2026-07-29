@@ -1,8 +1,18 @@
 """Classificação de tickets por IA (zero-shot) usando as categorias cadastradas no banco."""
 
-from transformers import pipeline
+import os
+
+from optimum.onnxruntime import ORTModelForSequenceClassification
+from transformers import AutoTokenizer, pipeline
 
 MODELO = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
+
+# Em produção (Docker), o modelo já vem convertido pra ONNX Runtime em
+# build-time (ver Dockerfile) — a inferência via ONNX Runtime é bem mais
+# rápida em CPU do que PyTorch "eager" puro, o que importa numa hospedagem
+# com vCPU compartilhado fraco. Localmente esse diretório não existe, então
+# a conversão acontece na hora (mais lenta só na primeira chamada).
+_DIR_MODELO_ONNX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "modelo_onnx")
 
 _classificador = None
 
@@ -13,7 +23,11 @@ def carregar_modelo():
     de download/carregamento do modelo."""
     global _classificador
     if _classificador is None:
-        _classificador = pipeline("zero-shot-classification", model=MODELO)
+        ja_convertido = os.path.isdir(_DIR_MODELO_ONNX)
+        origem = _DIR_MODELO_ONNX if ja_convertido else MODELO
+        modelo = ORTModelForSequenceClassification.from_pretrained(origem, export=not ja_convertido)
+        tokenizer = AutoTokenizer.from_pretrained(origem)
+        _classificador = pipeline("zero-shot-classification", model=modelo, tokenizer=tokenizer)
     return _classificador
 
 

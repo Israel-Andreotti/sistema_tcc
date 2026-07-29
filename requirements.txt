@@ -3,4 +3,5 @@ pandas
 altair
 transformers
 torch
+optimum[onnxruntime]
 libsql-client
