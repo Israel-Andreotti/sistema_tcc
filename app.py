@@ -19,17 +19,10 @@ try:
 except Exception:
     pass
 
-# Gate simples de protótipo — não é autenticação real, só separa a navegação
-# entre usuário comum e técnico de TI.
-SENHA_TECNICO = "tecnico123"
-
-# Session state dos widgets de login persiste entre reruns antes mesmo desses
-# widgets serem recriados — dá pra usar isso pra recolher a sidebar assim que
+# Login persiste em session_state entre reruns antes mesmo dos widgets da
+# sidebar serem recriados — dá pra usar isso pra recolher a sidebar assim que
 # o técnico loga, sem esperar mais uma interação.
-_JA_AUTENTICADO = (
-    st.session_state.get("papel_selecionado") == "Técnico de TI"
-    and st.session_state.get("senha_tecnico") == SENHA_TECNICO
-)
+_JA_AUTENTICADO = st.session_state.get("tecnico_logado") is not None
 
 st.set_page_config(
     page_title="Sistema de Tickets de TI",
@@ -128,9 +121,8 @@ def renderizar_notas(ticket_id: str):
             st.markdown(f"- `{nota['data_hora']}` **{nota['tecnico_nome']}**: {nota['texto']}")
 
 
-def _salvar_nota_e_limpar_campo(ticket_id: str, tecnico_key: str, texto_key: str):
+def _salvar_nota_e_limpar_campo(ticket_id: str, tecnico_nome: str, texto_key: str):
     texto = st.session_state.get(texto_key, "").strip()
-    tecnico_nome = st.session_state.get(tecnico_key)
     if not texto:
         return
     if backend_engine.adicionar_nota(ticket_id, tecnico_nome, texto):
@@ -154,6 +146,22 @@ def _sanitizar_ramal():
     valor_digitado = st.session_state.get("abrir_ramal", "")
     st.session_state["ramal_tem_letra"] = any(not c.isdigit() for c in valor_digitado)
     st.session_state["abrir_ramal"] = "".join(c for c in valor_digitado if c.isdigit())
+
+
+def _fazer_login_tecnico():
+    username = st.session_state.get("login_username", "").strip()
+    senha = st.session_state.get("login_senha", "")
+    tecnico = backend_engine.autenticar_tecnico(username, senha)
+    if tecnico:
+        st.session_state["tecnico_logado"] = tecnico
+        st.session_state["login_senha"] = ""
+        st.session_state["erro_login"] = False
+    else:
+        st.session_state["erro_login"] = True
+
+
+def _fazer_logout_tecnico():
+    st.session_state.pop("tecnico_logado", None)
 
 
 def _abrir_ticket_e_limpar_formulario(opcoes_setor: dict):
@@ -230,6 +238,7 @@ def tela_painel():
     ]
     tecnicos = backend_engine.listar_tecnicos()
     opcoes_tecnico = {t["nome"]: t["id"] for t in tecnicos}
+    nome_tecnico_logado = st.session_state["tecnico_logado"]["nome"]
 
     filtro = st.multiselect("Filtrar por status", status_para_filtro, default=status_para_filtro)
 
@@ -295,18 +304,13 @@ def tela_painel():
             st.markdown("**Notas de atendimento (procedimentos adotados)**")
             renderizar_notas(ticket["id"])
 
-            if not opcoes_tecnico:
-                st.warning("Cadastre um técnico para poder registrar notas.")
-            else:
-                col_nota_tec, col_nota_texto = st.columns([1, 3])
-                tecnico_key = f"nota_tec_{ticket['id']}"
-                texto_key = f"nota_texto_{ticket['id']}"
-                col_nota_tec.selectbox("Técnico responsável", list(opcoes_tecnico.keys()), key=tecnico_key)
-                texto_nota = col_nota_texto.text_area("Nova nota", key=texto_key, height=80)
-                st.button(
-                    "Adicionar nota", key=f"btn_nota_{ticket['id']}", disabled=not texto_nota.strip(),
-                    on_click=_salvar_nota_e_limpar_campo, args=(ticket["id"], tecnico_key, texto_key),
-                )
+            st.caption(f"Nota será registrada em nome de **{nome_tecnico_logado}** (técnico logado).")
+            texto_key = f"nota_texto_{ticket['id']}"
+            texto_nota = st.text_area("Nova nota", key=texto_key, height=80)
+            st.button(
+                "Adicionar nota", key=f"btn_nota_{ticket['id']}", disabled=not texto_nota.strip(),
+                on_click=_salvar_nota_e_limpar_campo, args=(ticket["id"], nome_tecnico_logado, texto_key),
+            )
 
             st.divider()
             btn_concluir_key = f"btn_concluir_{ticket['id']}"
@@ -587,6 +591,106 @@ def tela_gerenciar_setores():
         st.divider()
 
 
+def _cadastrar_tecnico_e_limpar():
+    nome = st.session_state.get("novo_tecnico_nome", "").strip()
+    username = st.session_state.get("novo_tecnico_username", "").strip()
+    senha = st.session_state.get("novo_tecnico_senha", "")
+
+    novo_id = backend_engine.criar_tecnico(nome, username, senha)
+    if novo_id is None:
+        st.toast("Não foi possível cadastrar o técnico. Verifique se o nome ou o usuário já existem.", icon="⚠️")
+        return
+
+    st.session_state["novo_tecnico_nome"] = ""
+    st.session_state["novo_tecnico_username"] = ""
+    st.session_state["novo_tecnico_senha"] = ""
+    st.toast(f"Técnico {nome} cadastrado com sucesso.")
+
+
+def tela_gerenciar_tecnicos():
+    st.subheader("Cadastrar novo técnico")
+
+    col_nome, col_user, col_senha = st.columns(3)
+    nome = col_nome.text_input("Nome", key="novo_tecnico_nome")
+    username = col_user.text_input("Usuário (login)", key="novo_tecnico_username", placeholder="Ex: joao.silva")
+    senha = col_senha.text_input("Senha inicial", type="password", key="novo_tecnico_senha")
+
+    pode_cadastrar = bool(nome.strip()) and bool(username.strip()) and bool(senha)
+    st.button(
+        "Cadastrar técnico", type="primary", disabled=not pode_cadastrar,
+        on_click=_cadastrar_tecnico_e_limpar,
+    )
+
+    st.divider()
+    st.subheader("Técnicos cadastrados")
+
+    tecnicos = backend_engine.listar_tecnicos_completo()
+    if not tecnicos:
+        st.info("Nenhum técnico cadastrado ainda.")
+        return
+
+    for tecnico in tecnicos:
+        tecnico_id = tecnico["id"]
+        editando_key = f"editando_tecnico_{tecnico_id}"
+
+        with st.container(key=f"tecnico_linha_{tecnico_id}"):
+            if not st.session_state.get(editando_key, False):
+                col1, col2, col3 = st.columns([3, 3, 1])
+                col1.write(tecnico["nome"])
+                col2.write(f"@{tecnico['username']}" if tecnico["username"] else "_(sem login definido)_")
+                with col3:
+                    if st.button("✏️", key=f"tecnico_edit_btn_{tecnico_id}"):
+                        st.session_state[editando_key] = True
+                        st.rerun()
+            else:
+                st.markdown(f"**Editando: {tecnico['nome']}**")
+                novo_nome = st.text_input("Nome", value=tecnico["nome"], key=f"editar_tecnico_nome_{tecnico_id}")
+                novo_username = st.text_input(
+                    "Usuário", value=tecnico["username"] or "", key=f"editar_tecnico_username_{tecnico_id}"
+                )
+                nova_senha = st.text_input(
+                    "Nova senha (deixe em branco para manter a atual)", type="password",
+                    key=f"editar_tecnico_senha_{tecnico_id}",
+                )
+
+                col_salvar, col_cancelar = st.columns(2)
+                if col_salvar.button("Salvar", key=f"btn_salvar_tecnico_{tecnico_id}", type="primary"):
+                    if backend_engine.atualizar_tecnico(tecnico_id, novo_nome.strip(), novo_username.strip()):
+                        if nova_senha:
+                            backend_engine.redefinir_senha_tecnico(tecnico_id, nova_senha)
+                        st.session_state[editando_key] = False
+                        st.success("Técnico atualizado.")
+                        st.rerun()
+                    else:
+                        st.error("Não foi possível atualizar. O nome ou o usuário podem já estar em uso.")
+                if col_cancelar.button("Cancelar", key=f"btn_cancelar_tecnico_{tecnico_id}"):
+                    st.session_state[editando_key] = False
+                    st.rerun()
+
+                confirmar_exclusao_key = f"confirmar_exclusao_tecnico_{tecnico_id}"
+                if not st.session_state.get(confirmar_exclusao_key, False):
+                    if st.button("Excluir técnico", key=f"btn_excluir_tecnico_{tecnico_id}"):
+                        st.session_state[confirmar_exclusao_key] = True
+                        st.rerun()
+                else:
+                    st.warning(f"Tem certeza que deseja excluir **{tecnico['nome']}**? Essa ação não pode ser desfeita.")
+                    col_sim, col_nao = st.columns(2)
+                    if col_sim.button("Sim, excluir", key=f"btn_confirma_excluir_tecnico_sim_{tecnico_id}", type="primary"):
+                        sucesso, mensagem = backend_engine.excluir_tecnico(tecnico_id)
+                        st.session_state[confirmar_exclusao_key] = False
+                        if sucesso:
+                            st.session_state[editando_key] = False
+                            st.success(mensagem)
+                        else:
+                            st.error(mensagem)
+                        st.rerun()
+                    if col_nao.button("Voltar", key=f"btn_confirma_excluir_tecnico_nao_{tecnico_id}"):
+                        st.session_state[confirmar_exclusao_key] = False
+                        st.rerun()
+
+        st.divider()
+
+
 def tela_dashboard():
     tickets = backend_engine.listar_tickets()
     df = pd.DataFrame(tickets)
@@ -641,15 +745,20 @@ if papel == "Usuário Comum":
     st.header("Abrir Ticket")
     tela_abrir_ticket()
 else:
-    senha = st.sidebar.text_input("Senha de técnico", type="password", key="senha_tecnico")
-    st.sidebar.button("Entrar")
-    if not senha:
-        st.info("Digite a senha de técnico na barra lateral para acessar o painel.")
-    elif senha != SENHA_TECNICO:
-        st.error("Senha incorreta.")
+    tecnico_logado = st.session_state.get("tecnico_logado")
+    if not tecnico_logado:
+        st.sidebar.text_input("Usuário", key="login_username")
+        st.sidebar.text_input("Senha", type="password", key="login_senha")
+        st.sidebar.button("Entrar", on_click=_fazer_login_tecnico)
+        if st.session_state.get("erro_login"):
+            st.sidebar.error("Usuário ou senha incorretos.")
+        st.info("Faça login com seu usuário de técnico na barra lateral para acessar o painel.")
     else:
-        tab_abrir, tab_painel, tab_historico, tab_setores, tab_dashboard = st.tabs(
-            ["Abrir Ticket", "Painel de Tickets", "Histórico", "Gerenciar Setores", "Dashboard"]
+        st.sidebar.success(f"Logado como **{tecnico_logado['nome']}**")
+        st.sidebar.button("Sair", on_click=_fazer_logout_tecnico)
+
+        tab_abrir, tab_painel, tab_historico, tab_setores, tab_tecnicos, tab_dashboard = st.tabs(
+            ["Abrir Ticket", "Painel de Tickets", "Histórico", "Gerenciar Setores", "Gerenciar Técnicos", "Dashboard"]
         )
         with tab_abrir:
             tela_abrir_ticket()
@@ -659,5 +768,7 @@ else:
             tela_historico()
         with tab_setores:
             tela_gerenciar_setores()
+        with tab_tecnicos:
+            tela_gerenciar_tecnicos()
         with tab_dashboard:
             tela_dashboard()

@@ -235,14 +235,17 @@ INSERT INTO matriz_sla (categoria_id, setor_id, tempo_sla_minutos) VALUES
 -- -----------------------------------------------------
 -- 5. Popula a tabela: TECNICO
 -- -----------------------------------------------------
--- Lista pré-definida de técnicos de TI que podem ser atribuídos a um ticket
-INSERT INTO tecnico (nome) VALUES
-('Abel Flore'),
-('Alexandre Nunes'),
-('Alisson Moraes'),
-('Carlos Alberto'),
-('Carlos Eduardo'),
-('Inez Caroline'),
-('Israel Andreotti'),
-('Jorge Marinho'),
-('Rodrigo');
+-- Lista pré-definida de técnicos de TI que podem ser atribuídos a um ticket.
+-- Login inicial de cada um: usuário = username abaixo, senha = "trocar123"
+-- (hash PBKDF2 já gerado com esse valor). Trocar a senha na tela "Gerenciar
+-- Técnicos" assim que possível.
+INSERT INTO tecnico (nome, username, senha_hash, senha_salt) VALUES
+('Abel Flore', 'abel.flore', '16f7719fc5b201348ef62d9f9adef2ed84a9b4a68209af9ee33760ffd676c715', 'af58f36a351bb5746e0e909877da6d1b'),
+('Alexandre Nunes', 'alexandre.nunes', 'c0d66c989dce5f161e970e5ac0b3dcaf74323e42daa04806bef744a7e198b0b6', 'cf22f706c3d0076e4ff6e0da9be2edc9'),
+('Alisson Moraes', 'alisson.moraes', '13445cb0e9d563ac5309ab6bcafc6757724b5ae8c433bbe1f0efa18506f40065', '5b46e2cfe8356bd5d2d37fc4d547aba5'),
+('Carlos Alberto', 'carlos.alberto', 'be628164bd7fa544027cf9637d4d1ce392df8409d3279f218090b4f18f8811ea', '8beae0b546bc06efe91a058f8807e954'),
+('Carlos Eduardo', 'carlos.eduardo', 'e4d104a8ce4769babc98013d572c56e95aaac09b72cc0a5a7d5aa06ff8b7559e', '582825274389645ef31f34735b179394'),
+('Inez Caroline', 'inez.caroline', '887ac5ab480df0a8a1abe2a62fb005ce8e8e146018a85cb3cc3c02619ea5fbf8', 'a809ddee7fcb301b5cf3b696e8edd371'),
+('Israel Andreotti', 'israel.andreotti', '5a3f438c5383ec8c05d8403d7d54360f81eec0d50c039c9bdb5817847f53f8c4', 'd34093717196533f26dbd8b76c04536e'),
+('Jorge Marinho', 'jorge.marinho', '0fb4bafeb7388dc3c7113ced413c7f80f6a11128d6b5e7af38572a09628fb744', '54ba528ee2f7880306e466ff3250a07f'),
+('Rodrigo', 'rodrigo', 'e13899095ec800c263b83c26398232a17adb89fe4c5ac364d6992ab15ef1f169', 'f6ea4696b91f42706229e1a14071ab27');

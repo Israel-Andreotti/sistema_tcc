@@ -17,7 +17,10 @@ CREATE TABLE IF NOT EXISTS setor (
 -- -----------------------------------------------------
 CREATE TABLE IF NOT EXISTS tecnico (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    nome TEXT NOT NULL UNIQUE
+    nome TEXT NOT NULL UNIQUE,
+    username TEXT UNIQUE,
+    senha_hash TEXT,
+    senha_salt TEXT
 );
 
 -- -----------------------------------------------------

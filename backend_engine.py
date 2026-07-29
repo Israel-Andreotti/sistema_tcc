@@ -1,4 +1,6 @@
+import hashlib
 import os
+import secrets
 import threading
 import uuid
 
@@ -10,6 +12,24 @@ import urgencia_engine
 STATUS_CONCLUIDO = "Concluído"
 STATUS_CANCELADO = "Cancelado"
 STATUS_TERMINAIS = {STATUS_CONCLUIDO, STATUS_CANCELADO}
+
+# Custo do PBKDF2 na criação/verificação de senha de técnico — alto o bastante
+# pra dificultar força bruta offline, sem pesar perceptivelmente numa tela de
+# login (rodando uma vez por tentativa, não em loop).
+_ITERACOES_SENHA = 200_000
+
+
+def _hash_senha(senha: str, salt_hex: str | None = None) -> tuple[str, str]:
+    salt_hex = salt_hex or secrets.token_hex(16)
+    hash_hex = hashlib.pbkdf2_hmac(
+        "sha256", senha.encode("utf-8"), bytes.fromhex(salt_hex), _ITERACOES_SENHA
+    ).hex()
+    return hash_hex, salt_hex
+
+
+def _senha_confere(senha: str, hash_armazenado: str, salt_hex: str) -> bool:
+    hash_calculado, _ = _hash_senha(senha, salt_hex)
+    return secrets.compare_digest(hash_calculado, hash_armazenado)
 
 
 class _Linha:
@@ -211,6 +231,106 @@ def listar_tecnicos() -> list[dict]:
     try:
         cursor = conn.execute("SELECT id, nome FROM tecnico ORDER BY nome")
         return [dict(linha) for linha in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def listar_tecnicos_completo() -> list[dict]:
+    """Igual a listar_tecnicos, mas inclui o username — usado na tela de
+    gerenciamento (o restante do app só precisa do nome pra dropdowns)."""
+    conn = _conectar()
+    try:
+        cursor = conn.execute("SELECT id, nome, username FROM tecnico ORDER BY nome")
+        return [dict(linha) for linha in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def autenticar_tecnico(username: str, senha: str) -> dict | None:
+    conn = _conectar()
+    try:
+        tecnico = conn.execute(
+            "SELECT id, nome, username, senha_hash, senha_salt FROM tecnico WHERE username = ?",
+            (username.strip().lower(),),
+        ).fetchone()
+        if not tecnico or not tecnico["senha_hash"]:
+            return None
+        if not _senha_confere(senha, tecnico["senha_hash"], tecnico["senha_salt"]):
+            return None
+        return {"id": tecnico["id"], "nome": tecnico["nome"], "username": tecnico["username"]}
+    finally:
+        conn.close()
+
+
+def criar_tecnico(nome: str, username: str, senha: str) -> int | None:
+    conn = _conectar()
+    try:
+        senha_hash, senha_salt = _hash_senha(senha)
+        cursor = conn.execute(
+            "INSERT INTO tecnico (nome, username, senha_hash, senha_salt) VALUES (?, ?, ?, ?)",
+            (nome.strip(), username.strip().lower(), senha_hash, senha_salt),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    except libsql_client.LibsqlError:
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
+
+
+def atualizar_tecnico(tecnico_id: int, nome: str, username: str) -> bool:
+    conn = _conectar()
+    try:
+        conn.execute(
+            "UPDATE tecnico SET nome = ?, username = ? WHERE id = ?",
+            (nome.strip(), username.strip().lower(), tecnico_id),
+        )
+        conn.commit()
+        return conn.total_changes > 0
+    except libsql_client.LibsqlError:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def redefinir_senha_tecnico(tecnico_id: int, nova_senha: str) -> bool:
+    conn = _conectar()
+    try:
+        senha_hash, senha_salt = _hash_senha(nova_senha)
+        conn.execute(
+            "UPDATE tecnico SET senha_hash = ?, senha_salt = ? WHERE id = ?",
+            (senha_hash, senha_salt, tecnico_id),
+        )
+        conn.commit()
+        return conn.total_changes > 0
+    except libsql_client.LibsqlError:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def excluir_tecnico(tecnico_id: int) -> tuple[bool, str]:
+    """Exclui o técnico, bloqueado se houver ticket (ativo ou histórico)
+    atribuído a ele — mesmo racional de excluir_setor: preferimos barrar aqui
+    a confiar no ON DELETE SET NULL do schema, que apagaria silenciosamente o
+    vínculo em vez de avisar quem está excluindo."""
+    conn = _conectar()
+    try:
+        tem_ticket = conn.execute(
+            "SELECT 1 FROM ticket WHERE tecnico_atribuido_id = ? LIMIT 1", (tecnico_id,)
+        ).fetchone()
+        if tem_ticket:
+            return False, "Não é possível excluir: existem tickets atribuídos a este técnico."
+
+        conn.execute("DELETE FROM tecnico WHERE id = ?", (tecnico_id,))
+        conn.commit()
+        return True, "Técnico excluído com sucesso."
+    except libsql_client.LibsqlError:
+        conn.rollback()
+        return False, "Não foi possível excluir o técnico."
     finally:
         conn.close()
 
