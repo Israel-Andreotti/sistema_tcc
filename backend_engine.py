@@ -438,8 +438,9 @@ def listar_tickets(filtro_status: str | None = None) -> list[dict]:
 def _listar_tickets_por_situacao(incluir_terminais: bool) -> list[dict]:
     """Filtra ativos/histórico direto no SQL (WHERE st.nome IN/NOT IN), em vez
     de buscar a tabela inteira e descartar linha em Python — evita trafegar
-    ticket concluído/cancelado toda vez que o Painel (que reconsulta sozinho
-    a cada 15s) só quer os ativos, por exemplo."""
+    ticket concluído/cancelado toda vez que o Painel só quer os ativos, por
+    exemplo. Veja também assinatura_tickets_ativos(), usada para detectar
+    mudanças sem buscar todos esses campos."""
     conn = _conectar()
     try:
         status = tuple(STATUS_TERMINAIS)
@@ -448,6 +449,27 @@ def _listar_tickets_por_situacao(incluir_terminais: bool) -> list[dict]:
         query = f"{_TICKETS_QUERY_BASE} WHERE st.nome {operador} ({placeholders}) ORDER BY t.data_criacao DESC"
         cursor = conn.execute(query, status)
         return [dict(linha) for linha in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def assinatura_tickets_ativos() -> tuple:
+    """Retrato leve (id, status, técnico) dos tickets ativos — sem os campos
+    pesados de categoria/urgência/SLA — usado só para detectar se algo mudou
+    desde a última checagem, sem precisar buscar o ticket inteiro toda vez."""
+    conn = _conectar()
+    try:
+        status = tuple(STATUS_TERMINAIS)
+        placeholders = ", ".join("?" for _ in status)
+        query = f"""
+            SELECT t.id, st.nome AS status, t.tecnico_atribuido_id
+            FROM ticket t
+            JOIN status_ticket st ON t.status_atual_id = st.id
+            WHERE st.nome NOT IN ({placeholders})
+        """
+        cursor = conn.execute(query, status)
+        linhas = cursor.fetchall()
+        return tuple(sorted((l["id"], l["status"], l["tecnico_atribuido_id"]) for l in linhas))
     finally:
         conn.close()
 

@@ -246,7 +246,23 @@ def tela_abrir_ticket():
 
 
 @st.fragment(run_every="15s")
+def _observar_novos_tickets():
+    """Fica de olho nos tickets ativos com uma consulta leve (sem os campos
+    pesados de categoria/urgência/SLA); só dispara um rerun completo quando a
+    assinatura muda de fato (ticket novo, concluído, cancelado ou reatribuído
+    em outra sessão) — assim o Painel não fica se reconstruindo (perdendo
+    scroll, expanders abertos etc.) a cada 15s à toa, só quando há algo novo."""
+    assinatura_atual = backend_engine.assinatura_tickets_ativos()
+    assinatura_anterior = st.session_state.get("_assinatura_tickets_painel")
+    st.session_state["_assinatura_tickets_painel"] = assinatura_atual
+    if assinatura_anterior is not None and assinatura_atual != assinatura_anterior:
+        st.rerun()
+
+
+@st.fragment
 def tela_painel():
+    _observar_novos_tickets()
+
     status_para_filtro = [
         s for s in backend_engine.listar_status()
         if s not in (backend_engine.STATUS_CONCLUIDO, backend_engine.STATUS_CANCELADO)
