@@ -94,3 +94,15 @@ CREATE TABLE IF NOT EXISTS ticket_nota (
     texto TEXT NOT NULL,
     FOREIGN KEY (ticket_id) REFERENCES ticket (id) ON DELETE CASCADE
 );
+
+-- -----------------------------------------------------
+-- Índices: as colunas abaixo são usadas em WHERE/JOIN a cada listagem de
+-- tickets (Painel, Histórico, Dashboard) e não tinham índice — cada consulta
+-- fazia um full table scan em `ticket`. Ver também database/init_turso.py
+-- (aplicar_indices), que cria estes mesmos índices sem precisar recriar as
+-- tabelas num banco que já está em produção.
+-- -----------------------------------------------------
+CREATE INDEX IF NOT EXISTS idx_ticket_status_atual_id ON ticket (status_atual_id);
+CREATE INDEX IF NOT EXISTS idx_ticket_setor_id ON ticket (setor_id);
+CREATE INDEX IF NOT EXISTS idx_ticket_categoria_atribuida_id ON ticket (categoria_atribuida_id);
+CREATE INDEX IF NOT EXISTS idx_ticket_tecnico_atribuido_id ON ticket (tecnico_atribuido_id);

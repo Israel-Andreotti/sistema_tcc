@@ -1,17 +1,23 @@
 # Banco de dados (gerado por database/init_db.py, não deve ir para o repositório)
+# *.db também cobre backend_engine.py:_turso_replica.db, a réplica embutida do
+# Turso — *.db-wal/-shm/-info são os arquivos auxiliares que ela gera do lado
+# (WAL mode + metadado de sync do libsql)
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
+*.db-info
+
+# Modelo convertido pra ONNX (gerado por converter_modelo.py / Dockerfile)
+modelo_onnx/
 
 # Ambiente Python
 __pycache__/
 *.pyc
 .venv/
+.venv*/
 venv/
 
 # Cache do Streamlit
 .streamlit/
 
-# Protótipo legado, substituído pelo sistema atual em app.py/backend_engine.py
-main.py
-categorias.txt
-ticket.xlsx

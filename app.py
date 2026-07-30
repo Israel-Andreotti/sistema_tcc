@@ -9,9 +9,9 @@ import backend_engine
 import ia_classificador
 import urgencia_engine
 
-# Credenciais do Turso ficam em .streamlit/secrets.toml (local) ou no painel de
-# Secrets do Streamlit Cloud (produção); espelhadas pra variável de ambiente
-# porque é isso que backend_engine.py lê.
+# Credenciais do Turso ficam em variável de ambiente em produção (Railway) ou,
+# em dev local, em .streamlit/secrets.toml — espelhadas pra variável de
+# ambiente aqui porque é isso que backend_engine.py lê.
 try:
     for _chave in ("TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN"):
         if _chave not in os.environ and _chave in st.secrets:
@@ -69,6 +69,30 @@ TIER_SLA_PADRAO = {
 @st.cache_resource(show_spinner="Carregando modelo de IA (zero-shot)... isso só acontece uma vez.")
 def carregar_modelo_ia():
     return ia_classificador.carregar_modelo()
+
+
+# Listagens que mudam raramente (setor, categoria, status, técnico) mas eram
+# consultadas no banco a cada rerun do Streamlit, mesmo sem nada ter mudado —
+# cacheadas aqui e invalidadas explicitamente (.clear()) só quando alguma
+# tela cadastra/edita/exclui o registro correspondente.
+@st.cache_data(ttl=300)
+def listar_setores_cache() -> list[dict]:
+    return backend_engine.listar_setores()
+
+
+@st.cache_data(ttl=300)
+def listar_categorias_cache() -> list[dict]:
+    return backend_engine.listar_categorias()
+
+
+@st.cache_data(ttl=300)
+def listar_status_cache() -> list[str]:
+    return backend_engine.listar_status()
+
+
+@st.cache_data(ttl=300)
+def listar_tecnicos_cache() -> list[dict]:
+    return backend_engine.listar_tecnicos()
 
 
 def badge_urgencia(urgencia: str) -> str:
@@ -206,7 +230,7 @@ def _abrir_ticket_e_limpar_formulario(opcoes_setor: dict):
 def tela_abrir_ticket():
     carregar_modelo_ia()  # garante o modelo carregado antes do primeiro ticket
 
-    setores = backend_engine.listar_setores()
+    setores = listar_setores_cache()
     if not setores:
         st.warning("Nenhum setor cadastrado. Rode database/init_db.py para popular o banco.")
         return
@@ -247,11 +271,7 @@ def tela_abrir_ticket():
 
 @st.fragment(run_every="15s")
 def _observar_novos_tickets():
-    """Fica de olho nos tickets ativos com uma consulta leve (sem os campos
-    pesados de categoria/urgência/SLA); só dispara um rerun completo quando a
-    assinatura muda de fato (ticket novo, concluído, cancelado ou reatribuído
-    em outra sessão) — assim o Painel não fica se reconstruindo (perdendo
-    scroll, expanders abertos etc.) a cada 15s à toa, só quando há algo novo."""
+    """Watcher que fica verificando se a assinatura de tickets ativos mudou, e força um rerun se mudou."""
     assinatura_atual = backend_engine.assinatura_tickets_ativos()
     assinatura_anterior = st.session_state.get("_assinatura_tickets_painel")
     st.session_state["_assinatura_tickets_painel"] = assinatura_atual
@@ -264,10 +284,10 @@ def tela_painel():
     _observar_novos_tickets()
 
     status_para_filtro = [
-        s for s in backend_engine.listar_status()
+        s for s in listar_status_cache()
         if s not in (backend_engine.STATUS_CONCLUIDO, backend_engine.STATUS_CANCELADO)
     ]
-    tecnicos = backend_engine.listar_tecnicos()
+    tecnicos = listar_tecnicos_cache()
     opcoes_tecnico = {t["nome"]: t["id"] for t in tecnicos}
     nome_tecnico_logado = st.session_state["tecnico_logado"]["nome"]
 
@@ -398,6 +418,7 @@ def tela_painel():
                     st.rerun()
 
 
+@st.fragment
 def tela_historico():
     tickets = backend_engine.listar_tickets_historico()
 
@@ -458,11 +479,13 @@ def _cadastrar_setor_e_limpar():
         st.toast("Não foi possível cadastrar o setor. Verifique se o nome ou a sigla já existem.", icon="⚠️")
         return
 
+    listar_setores_cache.clear()
     st.session_state["setor_pendente_sla"] = {"id": novo_id, "nome": nome, "criticidade_peso": criticidade}
     st.session_state["novo_setor_nome"] = ""
     st.session_state["novo_setor_sigla"] = ""
 
 
+@st.fragment
 def tela_gerenciar_setores():
     st.subheader("Cadastrar novo setor")
 
@@ -483,7 +506,7 @@ def tela_gerenciar_setores():
         )
     else:
         st.success(f"Setor **{setor_pendente['nome']}** cadastrado! Agora defina o SLA (em minutos) para cada categoria.")
-        categorias = backend_engine.listar_categorias()
+        categorias = listar_categorias_cache()
         tier = TIER_SLA_PADRAO.get(setor_pendente["criticidade_peso"], TIER_SLA_PADRAO[2])
 
         valores_sla = {}
@@ -509,7 +532,7 @@ def tela_gerenciar_setores():
     st.divider()
     st.subheader("Setores cadastrados")
 
-    setores = backend_engine.listar_setores()
+    setores = listar_setores_cache()
     if not setores:
         st.info("Nenhum setor cadastrado ainda.")
         return
@@ -529,7 +552,8 @@ def tela_gerenciar_setores():
         st.info("Nenhum setor encontrado para essa busca.")
         return
 
-    categorias = backend_engine.listar_categorias()
+    categorias = listar_categorias_cache()
+    sla_por_setor = backend_engine.obter_sla_todos_setores()
 
     st.markdown(
         """
@@ -563,7 +587,7 @@ def tela_gerenciar_setores():
     for setor in setores_filtrados:
         setor_id = setor["id"]
         editando_key = f"editando_setor_{setor_id}"
-        sla_atual = backend_engine.obter_sla_setor(setor_id)
+        sla_atual = sla_por_setor.get(setor_id, {})
 
         with st.container(key=f"setor_linha_{setor_id}"):
             if not st.session_state.get(editando_key, False):
@@ -603,6 +627,7 @@ def tela_gerenciar_setores():
                     if backend_engine.atualizar_setor(setor_id, novo_nome.strip(), nova_sigla.strip().upper(), nova_criticidade):
                         for categoria_id, minutos in novos_sla.items():
                             backend_engine.definir_sla(categoria_id, setor_id, int(minutos))
+                        listar_setores_cache.clear()
                         st.session_state[editando_key] = False
                         st.success("Setor atualizado. Os novos tickets já vão usar os valores atualizados.")
                         st.rerun()
@@ -624,6 +649,7 @@ def tela_gerenciar_setores():
                         sucesso, mensagem = backend_engine.excluir_setor(setor_id)
                         st.session_state[confirmar_exclusao_key] = False
                         if sucesso:
+                            listar_setores_cache.clear()
                             st.session_state[editando_key] = False
                             st.success(mensagem)
                         else:
@@ -646,12 +672,14 @@ def _cadastrar_tecnico_e_limpar():
         st.toast("Não foi possível cadastrar o técnico. Verifique se o nome ou o usuário já existem.", icon="⚠️")
         return
 
+    listar_tecnicos_cache.clear()
     st.session_state["novo_tecnico_nome"] = ""
     st.session_state["novo_tecnico_username"] = ""
     st.session_state["novo_tecnico_senha"] = ""
     st.toast(f"Técnico {nome} cadastrado com sucesso.")
 
 
+@st.fragment
 def tela_gerenciar_tecnicos():
     st.subheader("Cadastrar novo técnico")
 
@@ -703,6 +731,7 @@ def tela_gerenciar_tecnicos():
                     if backend_engine.atualizar_tecnico(tecnico_id, novo_nome.strip(), novo_username.strip()):
                         if nova_senha:
                             backend_engine.redefinir_senha_tecnico(tecnico_id, nova_senha)
+                        listar_tecnicos_cache.clear()
                         st.session_state[editando_key] = False
                         st.success("Técnico atualizado.")
                         st.rerun()
@@ -724,6 +753,7 @@ def tela_gerenciar_tecnicos():
                         sucesso, mensagem = backend_engine.excluir_tecnico(tecnico_id)
                         st.session_state[confirmar_exclusao_key] = False
                         if sucesso:
+                            listar_tecnicos_cache.clear()
                             st.session_state[editando_key] = False
                             st.success(mensagem)
                         else:
@@ -736,11 +766,15 @@ def tela_gerenciar_tecnicos():
         st.divider()
 
 
+@st.fragment
 def tela_dashboard():
-    tickets = backend_engine.listar_tickets()
-    df = pd.DataFrame(tickets)
+    # Consultas agregadas (COUNT + GROUP BY) direto no banco, em vez de trazer
+    # a tabela inteira com listar_tickets() só pra contar linhas em pandas.
+    contagem_urg = backend_engine.contagem_tickets_por_urgencia()
+    contagem_setor = backend_engine.contagem_tickets_por_setor()
+    contagem_cat = backend_engine.contagem_tickets_por_categoria()
 
-    if df.empty:
+    if not contagem_urg:
         st.info("Sem dados suficientes para o dashboard ainda.")
         return
 
@@ -748,9 +782,11 @@ def tela_dashboard():
 
     with col_a:
         st.subheader("Tickets por urgência")
-        contagem_urg = df["urgencia_calculada"].value_counts().reindex(ORDEM_URGENCIA, fill_value=0).reset_index()
-        contagem_urg.columns = ["urgencia", "quantidade"]
-        grafico_urg = alt.Chart(contagem_urg).mark_bar().encode(
+        df_urg = pd.DataFrame({
+            "urgencia": ORDEM_URGENCIA,
+            "quantidade": [contagem_urg.get(u, 0) for u in ORDEM_URGENCIA],
+        })
+        grafico_urg = alt.Chart(df_urg).mark_bar().encode(
             x=alt.X("urgencia:N", sort=ORDEM_URGENCIA, title=None),
             y=alt.Y("quantidade:Q", title="Tickets"),
             color=alt.Color("urgencia:N", scale=alt.Scale(domain=ORDEM_URGENCIA, range=[CORES_URGENCIA[u] for u in ORDEM_URGENCIA]), legend=None),
@@ -760,9 +796,12 @@ def tela_dashboard():
 
     with col_b:
         st.subheader("Tickets por setor")
-        contagem_setor = df["setor"].value_counts().reset_index()
-        contagem_setor.columns = ["setor", "quantidade"]
-        grafico_setor = alt.Chart(contagem_setor).mark_bar().encode(
+        setores_ordenados = sorted(contagem_setor, key=contagem_setor.get, reverse=True)
+        df_setor = pd.DataFrame({
+            "setor": setores_ordenados,
+            "quantidade": [contagem_setor[s] for s in setores_ordenados],
+        })
+        grafico_setor = alt.Chart(df_setor).mark_bar().encode(
             x=alt.X("quantidade:Q", title="Tickets"),
             y=alt.Y("setor:N", sort="-x", title=None),
             tooltip=["setor", "quantidade"],
@@ -770,10 +809,12 @@ def tela_dashboard():
         st.altair_chart(grafico_setor, width='stretch')
 
     st.subheader("Tickets por categoria (classificação da IA)")
-    categorias_ordenadas = sorted(df["categoria"].unique().tolist())
-    contagem_cat = df["categoria"].value_counts().reindex(categorias_ordenadas, fill_value=0).reset_index()
-    contagem_cat.columns = ["categoria", "quantidade"]
-    grafico_cat = alt.Chart(contagem_cat).mark_bar().encode(
+    categorias_ordenadas = sorted(contagem_cat)
+    df_cat = pd.DataFrame({
+        "categoria": categorias_ordenadas,
+        "quantidade": [contagem_cat[c] for c in categorias_ordenadas],
+    })
+    grafico_cat = alt.Chart(df_cat).mark_bar().encode(
         x=alt.X("categoria:N", sort=categorias_ordenadas, title=None),
         y=alt.Y("quantidade:Q", title="Tickets"),
         color=alt.Color("categoria:N", scale=alt.Scale(domain=categorias_ordenadas, range=CORES_CATEGORIA[:len(categorias_ordenadas)]), legend=None),

@@ -30,23 +30,11 @@ def _classificar_score(score: float) -> str:
     return "Baixa"
 
 
-def calcular_urgencia(categoria_id: int, setor_id: int, conn) -> dict:
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT peso_base FROM categoria WHERE id = ?", (categoria_id,))
-    categoria = cursor.fetchone()
-    peso_base_categoria = categoria["peso_base"] if categoria else 0
-
-    cursor.execute("SELECT criticidade_peso FROM setor WHERE id = ?", (setor_id,))
-    setor = cursor.fetchone()
-    criticidade_peso_setor = setor["criticidade_peso"] if setor else 1
-
-    cursor.execute(
-        "SELECT tempo_sla_minutos FROM matriz_sla WHERE categoria_id = ? AND setor_id = ?",
-        (categoria_id, setor_id),
-    )
-    regra = cursor.fetchone()
-    tempo_sla_minutos = regra["tempo_sla_minutos"] if regra else SLA_PADRAO_MINUTOS
+def calcular_urgencia(peso_base_categoria: int, criticidade_peso_setor: int, tempo_sla_minutos: int | None) -> dict:
+    """Função pura — quem chama já busca peso_base/criticidade_peso/SLA numa
+    única consulta com JOIN (ver criar_ticket em backend_engine.py) em vez de
+    fazer essa função consultar o banco de novo, uma vez por campo."""
+    tempo_sla_minutos = tempo_sla_minutos or SLA_PADRAO_MINUTOS
 
     score = (peso_base_categoria + criticidade_peso_setor * PESO_SETOR) * FATOR_ESCALA / tempo_sla_minutos
     urgencia = _classificar_score(score)

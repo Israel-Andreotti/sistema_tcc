@@ -4,7 +4,7 @@ import secrets
 import threading
 import uuid
 
-import libsql_client
+import libsql
 
 import ia_classificador
 import urgencia_engine
@@ -35,7 +35,9 @@ def _senha_confere(senha: str, hash_armazenado: str, salt_hex: str) -> bool:
 class _Linha:
     """Combina acesso por índice e por nome (como sqlite3.Row), pra manter
     compatível o resto do módulo, que usa tanto dict(linha) quanto
-    linha[0]/linha["campo"]."""
+    linha[0]/linha["campo"]. A réplica embutida (ver _obter_conexao_nativa)
+    devolve tuplas puras, sem acesso por nome — por isso o mapeamento por
+    nome é resolvido aqui via _colunas, e não delegado à linha bruta."""
     __slots__ = ("_row", "_colunas")
 
     def __init__(self, row, colunas):
@@ -43,6 +45,8 @@ class _Linha:
         self._colunas = colunas
 
     def __getitem__(self, chave):
+        if isinstance(chave, str):
+            return self._row[self._colunas.index(chave)]
         return self._row[chave]
 
     def keys(self):
@@ -50,34 +54,44 @@ class _Linha:
 
 
 class _Cursor:
-    """Imita o pedaço da API de sqlite3.Cursor usado neste projeto."""
+    """Imita o pedaço da API de sqlite3.Cursor usado neste projeto, por cima
+    do cursor nativo do libsql (embedded replica)."""
 
     def __init__(self, conexao: "_Conexao"):
         self._conexao = conexao
-        self._linhas: list[_Linha] = []
-        self.lastrowid = None
+        self._cursor_nativo = None
 
     def execute(self, sql: str, parametros=()) -> "_Cursor":
-        resultado = self._conexao._client.execute(sql, tuple(parametros))
-        self._conexao.total_changes += max(resultado.rows_affected, 0)
-        self._linhas = [_Linha(linha, resultado.columns) for linha in resultado.rows]
-        self.lastrowid = resultado.last_insert_rowid
+        self._cursor_nativo = self._conexao._nativa.execute(sql, list(parametros))
+        linhas_afetadas = self._cursor_nativo.rowcount
+        if linhas_afetadas and linhas_afetadas > 0:
+            self._conexao.total_changes += linhas_afetadas
         return self
 
+    def _colunas(self) -> list[str]:
+        descricao = self._cursor_nativo.description
+        return [coluna[0] for coluna in descricao] if descricao else []
+
     def fetchone(self):
-        return self._linhas[0] if self._linhas else None
+        linha = self._cursor_nativo.fetchone()
+        return _Linha(linha, self._colunas()) if linha is not None else None
 
     def fetchall(self):
-        return self._linhas
+        colunas = self._colunas()
+        return [_Linha(linha, colunas) for linha in self._cursor_nativo.fetchall()]
+
+    @property
+    def lastrowid(self):
+        return self._cursor_nativo.lastrowid
 
 
 class _Conexao:
     """Imita o pedaço da API de sqlite3.Connection usado neste projeto, por
-    cima do cliente HTTP do Turso — assim o resto do backend_engine.py (e
+    cima da conexão nativa do libsql — assim o resto do backend_engine.py (e
     ia_classificador.py/urgencia_engine.py) não precisou mudar."""
 
-    def __init__(self, client):
-        self._client = client
+    def __init__(self, nativa):
+        self._nativa = nativa
         self.total_changes = 0
 
     def execute(self, sql: str, parametros=()) -> _Cursor:
@@ -87,39 +101,54 @@ class _Conexao:
         return _Cursor(self)
 
     def commit(self):
-        pass
+        # Aplica a escrita no primary remoto e sincroniza a réplica local na
+        # sequência, pra quem escreveu enxergar o próprio dado imediatamente
+        # na próxima leitura (sem esperar o sync_interval em background).
+        self._nativa.commit()
+        self._nativa.sync()
 
     def rollback(self):
-        pass
+        self._nativa.rollback()
 
     def close(self):
-        # O client HTTP é compartilhado entre chamadas (ver _obter_client) — não
-        # faz sentido fechar a conexão a cada função, só reseta o estado local.
+        # A conexão embutida é compartilhada entre chamadas (ver
+        # _obter_conexao_nativa) — não faz sentido fechar/reabrir (e perder a
+        # réplica local sincronizada) a cada função, só reseta o estado local.
         pass
 
 
-_client: libsql_client.ClientSync | None = None
-_client_lock = threading.Lock()
+_CAMINHO_REPLICA_LOCAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_turso_replica.db")
+_SYNC_INTERVAL_SEGUNDOS = 5.0
+
+_conexao_nativa = None
+_conexao_lock = threading.Lock()
 
 
-def _obter_client() -> libsql_client.ClientSync:
-    """Reaproveita um único client HTTP entre todas as chamadas do processo,
-    em vez de abrir/fechar uma conexão nova a cada função — o ClientSync é
-    thread-safe (roda seu próprio loop assíncrono num thread dedicado), o que
-    é seguro mesmo com várias sessões do Streamlit chamando em paralelo."""
-    global _client
-    if _client is None:
-        with _client_lock:
-            if _client is None:
-                _client = libsql_client.create_client_sync(
-                    os.environ["TURSO_DATABASE_URL"],
+def _obter_conexao_nativa():
+    """Reaproveita uma única réplica embutida (embedded replica) entre todas
+    as chamadas do processo: leituras acontecem no arquivo SQLite local
+    (_turso_replica.db, fora do repositório — ver .gitignore), sem round-trip
+    de rede, e o libsql sincroniza esse arquivo com o banco remoto do Turso em
+    segundo plano a cada _SYNC_INTERVAL_SEGUNDOS. Escritas continuam indo pro
+    remoto (ver _Conexao.commit). A libsql-python documenta a Connection como
+    thread-safe, o que é necessário aqui já que várias sessões do Streamlit
+    podem chamar em paralelo."""
+    global _conexao_nativa
+    if _conexao_nativa is None:
+        with _conexao_lock:
+            if _conexao_nativa is None:
+                _conexao_nativa = libsql.connect(
+                    _CAMINHO_REPLICA_LOCAL,
+                    sync_url=os.environ["TURSO_DATABASE_URL"],
                     auth_token=os.environ["TURSO_AUTH_TOKEN"],
+                    sync_interval=_SYNC_INTERVAL_SEGUNDOS,
                 )
-    return _client
+                _conexao_nativa.sync()
+    return _conexao_nativa
 
 
 def _conectar() -> _Conexao:
-    return _Conexao(_obter_client())
+    return _Conexao(_obter_conexao_nativa())
 
 
 def listar_setores() -> list[dict]:
@@ -149,7 +178,7 @@ def criar_setor(nome: str, sigla: str, criticidade_peso: int) -> int | None:
         )
         conn.commit()
         return cursor.lastrowid
-    except libsql_client.LibsqlError:
+    except ValueError:
         conn.rollback()
         return None
     finally:
@@ -165,7 +194,7 @@ def atualizar_setor(setor_id: int, nome: str, sigla: str, criticidade_peso: int)
         )
         conn.commit()
         return conn.total_changes > 0
-    except libsql_client.LibsqlError:
+    except ValueError:
         conn.rollback()
         return False
     finally:
@@ -177,8 +206,9 @@ def excluir_setor(setor_id: int) -> tuple[bool, str]:
     (ativos ou no histórico) apontando para esse setor.
 
     A checagem é feita explicitamente aqui (em vez de confiar em ON DELETE
-    RESTRICT do schema) porque o Turso, via HTTP, não garante que o PRAGMA
-    foreign_keys=ON de uma chamada valha pras chamadas seguintes."""
+    RESTRICT do schema) porque a conexão nunca liga PRAGMA foreign_keys=ON —
+    isso também dá uma mensagem de erro amigável em vez do erro genérico de
+    violação de chave estrangeira."""
     conn = _conectar()
     try:
         tem_ticket = conn.execute(
@@ -191,21 +221,24 @@ def excluir_setor(setor_id: int) -> tuple[bool, str]:
         conn.execute("DELETE FROM setor WHERE id = ?", (setor_id,))
         conn.commit()
         return True, "Setor excluído com sucesso."
-    except libsql_client.LibsqlError:
+    except ValueError:
         conn.rollback()
         return False, "Não foi possível excluir o setor."
     finally:
         conn.close()
 
 
-def obter_sla_setor(setor_id: int) -> dict:
+def obter_sla_todos_setores() -> dict[int, dict]:
+    """{setor_id: {categoria_id: tempo_sla_minutos}} pra todos os setores de
+    uma vez — evita o padrão N+1 de consultar o SLA setor por setor dentro de
+    um laço (ver tela_gerenciar_setores em app.py)."""
     conn = _conectar()
     try:
-        cursor = conn.execute(
-            "SELECT categoria_id, tempo_sla_minutos FROM matriz_sla WHERE setor_id = ?",
-            (setor_id,),
-        )
-        return {linha["categoria_id"]: linha["tempo_sla_minutos"] for linha in cursor.fetchall()}
+        cursor = conn.execute("SELECT setor_id, categoria_id, tempo_sla_minutos FROM matriz_sla")
+        sla_por_setor: dict[int, dict] = {}
+        for linha in cursor.fetchall():
+            sla_por_setor.setdefault(linha["setor_id"], {})[linha["categoria_id"]] = linha["tempo_sla_minutos"]
+        return sla_por_setor
     finally:
         conn.close()
 
@@ -219,7 +252,7 @@ def definir_sla(categoria_id: int, setor_id: int, tempo_sla_minutos: int) -> boo
         """, (categoria_id, setor_id, tempo_sla_minutos))
         conn.commit()
         return True
-    except libsql_client.LibsqlError:
+    except ValueError:
         conn.rollback()
         return False
     finally:
@@ -272,7 +305,7 @@ def criar_tecnico(nome: str, username: str, senha: str) -> int | None:
         )
         conn.commit()
         return cursor.lastrowid
-    except libsql_client.LibsqlError:
+    except ValueError:
         conn.rollback()
         return None
     finally:
@@ -288,7 +321,7 @@ def atualizar_tecnico(tecnico_id: int, nome: str, username: str) -> bool:
         )
         conn.commit()
         return conn.total_changes > 0
-    except libsql_client.LibsqlError:
+    except ValueError:
         conn.rollback()
         return False
     finally:
@@ -305,7 +338,7 @@ def redefinir_senha_tecnico(tecnico_id: int, nova_senha: str) -> bool:
         )
         conn.commit()
         return conn.total_changes > 0
-    except libsql_client.LibsqlError:
+    except ValueError:
         conn.rollback()
         return False
     finally:
@@ -328,7 +361,7 @@ def excluir_tecnico(tecnico_id: int) -> tuple[bool, str]:
         conn.execute("DELETE FROM tecnico WHERE id = ?", (tecnico_id,))
         conn.commit()
         return True, "Técnico excluído com sucesso."
-    except libsql_client.LibsqlError:
+    except ValueError:
         conn.rollback()
         return False, "Não foi possível excluir o técnico."
     finally:
@@ -353,36 +386,58 @@ def criar_ticket(
 ) -> dict | None:
     conn = _conectar()
     try:
-        setor = conn.execute("SELECT id, nome FROM setor WHERE id = ?", (setor_id,)).fetchone()
+        # setor e status "Novo" não têm relação entre si, mas dá pra buscar os
+        # dois num único round-trip juntando as tabelas sem condição de junção
+        # (cada WHERE filtra a sua própria tabela) — 1 consulta em vez de 2.
+        setor = conn.execute(
+            """
+            SELECT s.id, s.nome, s.criticidade_peso, st.id AS status_novo_id
+            FROM setor s, status_ticket st
+            WHERE s.id = ? AND st.nome = 'Novo'
+            """,
+            (setor_id,),
+        ).fetchone()
         if not setor:
             return None
+        status_id = setor["status_novo_id"] or 1
 
         categoria_nome, confianca_ia = ia_classificador.classificar(descricao_chamado, conn)
+
+        # categoria + peso_base + SLA da combinação categoria/setor, também
+        # numa única consulta (era categoria, peso_base e matriz_sla em três
+        # idas ao banco separadas).
         categoria = conn.execute(
-            "SELECT id, nome FROM categoria WHERE nome = ?", (categoria_nome,)
+            """
+            SELECT cat.id, cat.nome, cat.peso_base, sla.tempo_sla_minutos
+            FROM categoria cat
+            LEFT JOIN matriz_sla sla ON sla.categoria_id = cat.id AND sla.setor_id = ?
+            WHERE cat.nome = ?
+            """,
+            (setor_id, categoria_nome),
         ).fetchone()
         if not categoria:
             return None
 
-        resultado_urgencia = urgencia_engine.calcular_urgencia(categoria["id"], setor_id, conn)
-
-        status_novo = conn.execute("SELECT id FROM status_ticket WHERE nome = 'Novo'").fetchone()
-        status_id = status_novo["id"] if status_novo else 1
+        resultado_urgencia = urgencia_engine.calcular_urgencia(
+            categoria["peso_base"], setor["criticidade_peso"], categoria["tempo_sla_minutos"]
+        )
 
         ticket_id = str(uuid.uuid4())
-        cursor = conn.execute("""
+        # RETURNING evita uma segunda ida ao banco só pra reler o número que
+        # acabou de ser gerado pela subquery de auto-incremento.
+        numero = conn.execute("""
             INSERT INTO ticket (
                 id, numero, data_criacao, solicitante_nome, solicitante_ramal, solicitante_sala,
                 descricao_original, urgencia_calculada, urgencia_score, confianca_ia,
                 data_limite_sla, categoria_atribuida_id, setor_id, status_atual_id
             ) VALUES (?, (SELECT COALESCE(MAX(numero), 0) + 1 FROM ticket), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING numero
         """, (
             ticket_id, resultado_urgencia["data_criacao"], solicitante_nome, solicitante_ramal,
             solicitante_sala, descricao_chamado, resultado_urgencia["urgencia"],
             resultado_urgencia["score"], confianca_ia, resultado_urgencia["data_limite_sla"],
             categoria["id"], setor_id, status_id,
-        ))
-        numero = conn.execute("SELECT numero FROM ticket WHERE id = ?", (ticket_id,)).fetchone()["numero"]
+        )).fetchone()["numero"]
         conn.commit()
 
         return {
@@ -398,7 +453,7 @@ def criar_ticket(
             "tempo_sla_minutos": resultado_urgencia["tempo_sla_minutos"],
             "data_limite": resultado_urgencia["data_limite_sla"],
         }
-    except libsql_client.LibsqlError:
+    except ValueError:
         conn.rollback()
         return None
     finally:
@@ -431,6 +486,44 @@ def listar_tickets(filtro_status: str | None = None) -> list[dict]:
 
         cursor = conn.execute(query, parametros)
         return [dict(linha) for linha in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def contagem_tickets_por_urgencia() -> dict[str, int]:
+    """{urgencia: quantidade} pra todo o histórico de tickets — usado no
+    Dashboard, que antes buscava a tabela inteira com listar_tickets() só pra
+    contar linhas em pandas."""
+    conn = _conectar()
+    try:
+        cursor = conn.execute("SELECT urgencia_calculada, COUNT(*) AS quantidade FROM ticket GROUP BY urgencia_calculada")
+        return {linha["urgencia_calculada"]: linha["quantidade"] for linha in cursor.fetchall()}
+    finally:
+        conn.close()
+
+
+def contagem_tickets_por_setor() -> dict[str, int]:
+    conn = _conectar()
+    try:
+        cursor = conn.execute("""
+            SELECT s.nome AS setor, COUNT(*) AS quantidade
+            FROM ticket t JOIN setor s ON t.setor_id = s.id
+            GROUP BY s.nome
+        """)
+        return {linha["setor"]: linha["quantidade"] for linha in cursor.fetchall()}
+    finally:
+        conn.close()
+
+
+def contagem_tickets_por_categoria() -> dict[str, int]:
+    conn = _conectar()
+    try:
+        cursor = conn.execute("""
+            SELECT c.nome AS categoria, COUNT(*) AS quantidade
+            FROM ticket t JOIN categoria c ON t.categoria_atribuida_id = c.id
+            GROUP BY c.nome
+        """)
+        return {linha["categoria"]: linha["quantidade"] for linha in cursor.fetchall()}
     finally:
         conn.close()
 
@@ -505,7 +598,7 @@ def atualizar_status(ticket_id: str, novo_status: str) -> bool:
         )
         conn.commit()
         return conn.total_changes > 0
-    except libsql_client.LibsqlError:
+    except ValueError:
         conn.rollback()
         return False
     finally:
@@ -533,7 +626,7 @@ def adicionar_nota(ticket_id: str, tecnico_nome: str, texto: str) -> bool:
         )
         conn.commit()
         return True
-    except libsql_client.LibsqlError:
+    except ValueError:
         conn.rollback()
         return False
     finally:
@@ -557,7 +650,7 @@ def atribuir_tecnico(ticket_id: str, tecnico_id: int) -> bool:
         )
         conn.commit()
         return conn.total_changes > 0
-    except libsql_client.LibsqlError:
+    except ValueError:
         conn.rollback()
         return False
     finally:

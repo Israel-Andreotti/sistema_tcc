@@ -5,7 +5,7 @@ ausentes, de .streamlit/secrets.toml (o mesmo arquivo usado pelo app)."""
 import os
 import tomllib
 
-import libsql_client
+import libsql
 
 DIRETORIO_ATUAL = os.path.dirname(os.path.abspath(__file__))
 CAMINHO_SCHEMA = os.path.join(DIRETORIO_ATUAL, "schema.sql")
@@ -39,15 +39,33 @@ def _statements(caminho: str) -> list[str]:
 
 def inicializar_banco():
     url, auth_token = _credenciais()
-    client = libsql_client.create_client_sync(url, auth_token=auth_token)
+    client = libsql.connect(url, auth_token=auth_token)
     try:
         for tabela in TABELAS:
             client.execute(f"DROP TABLE IF EXISTS {tabela}")
         for statement in _statements(CAMINHO_SCHEMA) + _statements(CAMINHO_SEED):
             client.execute(statement)
+        client.commit()
     finally:
         client.close()
     print("Banco Turso recriado com sucesso!")
+
+
+def aplicar_indices():
+    """Cria os índices de ticket.sql (status_atual_id, setor_id,
+    categoria_atribuida_id, tecnico_atribuido_id) num banco que já existe,
+    sem apagar tabelas — use isto em produção em vez de inicializar_banco(),
+    que dropa tudo antes de recriar."""
+    url, auth_token = _credenciais()
+    client = libsql.connect(url, auth_token=auth_token)
+    try:
+        for statement in _statements(CAMINHO_SCHEMA):
+            if statement.strip().upper().startswith("CREATE INDEX"):
+                client.execute(statement)
+        client.commit()
+    finally:
+        client.close()
+    print("Índices aplicados com sucesso!")
 
 
 if __name__ == "__main__":
