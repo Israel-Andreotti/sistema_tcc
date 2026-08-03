@@ -68,5 +68,31 @@ def aplicar_indices():
     print("Índices aplicados com sucesso!")
 
 
+def aplicar_migracoes():
+    """Aplica num banco Turso já populado (produção) mudanças de schema feitas
+    depois do deploy inicial, sem apagar dados — hoje só a coluna
+    tecnico.is_admin, guardada por PRAGMA table_info já que SQLite/libsql não
+    tem ADD COLUMN IF NOT EXISTS."""
+    url, auth_token = _credenciais()
+    client = libsql.connect(url, auth_token=auth_token)
+    try:
+        colunas_tecnico = {linha[1] for linha in client.execute("PRAGMA table_info(tecnico)").fetchall()}
+        if "is_admin" not in colunas_tecnico:
+            client.execute("ALTER TABLE tecnico ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+            # Promove quem já tinha login antes da migração — hoje eles já têm,
+            # de fato, acesso irrestrito; preserva esse acesso em vez de trancar
+            # todo mundo fora. Só roda uma vez (dentro do "if" acima), pra não
+            # sobrescrever curadoria feita depois pelo usuário em produção.
+            client.execute("UPDATE tecnico SET is_admin = 1")
+        if "ativo" not in colunas_tecnico:
+            # DEFAULT 1 já cobre os técnicos existentes automaticamente — sem
+            # UPDATE extra, ao contrário de is_admin acima.
+            client.execute("ALTER TABLE tecnico ADD COLUMN ativo INTEGER NOT NULL DEFAULT 1")
+        client.commit()
+    finally:
+        client.close()
+    print("Migrações aplicadas com sucesso!")
+
+
 if __name__ == "__main__":
     inicializar_banco()

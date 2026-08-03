@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS tecnico (
     nome TEXT NOT NULL UNIQUE,
     username TEXT UNIQUE,
     senha_hash TEXT,
-    senha_salt TEXT
+    senha_salt TEXT,
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    ativo INTEGER NOT NULL DEFAULT 1
 );
 
 -- -----------------------------------------------------

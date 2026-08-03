@@ -260,21 +260,38 @@ def definir_sla(categoria_id: int, setor_id: int, tempo_sla_minutos: int) -> boo
 
 
 def listar_tecnicos() -> list[dict]:
+    """Só técnicos ativos — usada pelo dropdown "Atribuir técnico" do Painel;
+    quem saiu da empresa (ativo = 0) não deve aparecer como opção pra novas
+    atribuições, mas continua no banco com o histórico intacto."""
     conn = _conectar()
     try:
-        cursor = conn.execute("SELECT id, nome FROM tecnico ORDER BY nome")
+        cursor = conn.execute("SELECT id, nome FROM tecnico WHERE ativo = 1 ORDER BY nome")
         return [dict(linha) for linha in cursor.fetchall()]
     finally:
         conn.close()
 
 
 def listar_tecnicos_completo() -> list[dict]:
-    """Igual a listar_tecnicos, mas inclui o username — usado na tela de
-    gerenciamento (o restante do app só precisa do nome pra dropdowns)."""
+    """Igual a listar_tecnicos, mas inclui username/is_admin/ativo e também os
+    inativos — usado na tela de gerenciamento (o restante do app só precisa
+    do nome dos ativos pra dropdowns)."""
     conn = _conectar()
     try:
-        cursor = conn.execute("SELECT id, nome, username FROM tecnico ORDER BY nome")
+        cursor = conn.execute("SELECT id, nome, username, is_admin, ativo FROM tecnico ORDER BY nome")
         return [dict(linha) for linha in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def contar_admins() -> int:
+    """Admins ativos — só eles contam pra garantir que sempre sobre alguém
+    capaz de logar como admin (ver atualizar_tecnico). Um admin desativado
+    não consegue mais logar, então não é proteção real contra ficar sem
+    ninguém pra gerenciar o sistema."""
+    conn = _conectar()
+    try:
+        cursor = conn.execute("SELECT COUNT(*) AS total FROM tecnico WHERE is_admin = 1 AND ativo = 1")
+        return cursor.fetchone()["total"]
     finally:
         conn.close()
 
@@ -283,25 +300,28 @@ def autenticar_tecnico(username: str, senha: str) -> dict | None:
     conn = _conectar()
     try:
         tecnico = conn.execute(
-            "SELECT id, nome, username, senha_hash, senha_salt FROM tecnico WHERE username = ?",
+            "SELECT id, nome, username, is_admin, senha_hash, senha_salt FROM tecnico WHERE username = ? AND ativo = 1",
             (username.strip().lower(),),
         ).fetchone()
         if not tecnico or not tecnico["senha_hash"]:
             return None
         if not _senha_confere(senha, tecnico["senha_hash"], tecnico["senha_salt"]):
             return None
-        return {"id": tecnico["id"], "nome": tecnico["nome"], "username": tecnico["username"]}
+        return {
+            "id": tecnico["id"], "nome": tecnico["nome"], "username": tecnico["username"],
+            "is_admin": bool(tecnico["is_admin"]),
+        }
     finally:
         conn.close()
 
 
-def criar_tecnico(nome: str, username: str, senha: str) -> int | None:
+def criar_tecnico(nome: str, username: str, senha: str, is_admin: bool = False) -> int | None:
     conn = _conectar()
     try:
         senha_hash, senha_salt = _hash_senha(senha)
         cursor = conn.execute(
-            "INSERT INTO tecnico (nome, username, senha_hash, senha_salt) VALUES (?, ?, ?, ?)",
-            (nome.strip(), username.strip().lower(), senha_hash, senha_salt),
+            "INSERT INTO tecnico (nome, username, senha_hash, senha_salt, is_admin) VALUES (?, ?, ?, ?, ?)",
+            (nome.strip(), username.strip().lower(), senha_hash, senha_salt, int(is_admin)),
         )
         conn.commit()
         return cursor.lastrowid
@@ -312,12 +332,51 @@ def criar_tecnico(nome: str, username: str, senha: str) -> int | None:
         conn.close()
 
 
-def atualizar_tecnico(tecnico_id: int, nome: str, username: str) -> bool:
+def atualizar_tecnico(tecnico_id: int, nome: str, username: str, is_admin: bool, ativo: bool) -> bool:
     conn = _conectar()
     try:
+        # Impede que a mudança (desmarcar Admin ou desmarcar Ativo) zere os
+        # admins efetivamente utilizáveis, senão o sistema fica sem ninguém
+        # capaz de logar e acessar "Gerenciar Técnicos" (checagem no backend,
+        # não só na UI, pra nenhum outro caminho de código conseguir isso sem
+        # querer).
+        sera_admin_ativo = is_admin and ativo
+        if not sera_admin_ativo:
+            tecnico_atual = conn.execute(
+                "SELECT is_admin, ativo FROM tecnico WHERE id = ?", (tecnico_id,)
+            ).fetchone()
+            era_admin_ativo = tecnico_atual and tecnico_atual["is_admin"] and tecnico_atual["ativo"]
+            if era_admin_ativo and contar_admins() <= 1:
+                return False
+
         conn.execute(
-            "UPDATE tecnico SET nome = ?, username = ? WHERE id = ?",
-            (nome.strip(), username.strip().lower(), tecnico_id),
+            "UPDATE tecnico SET nome = ?, username = ?, is_admin = ?, ativo = ? WHERE id = ?",
+            (nome.strip(), username.strip().lower(), int(is_admin), int(ativo), tecnico_id),
+        )
+        conn.commit()
+        return conn.total_changes > 0
+    except ValueError:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def alterar_propria_senha(tecnico_id: int, senha_atual: str, nova_senha: str) -> bool:
+    """Autoatendimento: exige a senha atual, diferente de
+    redefinir_senha_tecnico (reset administrativo feito por um admin em nome
+    de outro técnico, sem exigir a senha atual — ver tela_gerenciar_tecnicos)."""
+    conn = _conectar()
+    try:
+        tecnico = conn.execute(
+            "SELECT senha_hash, senha_salt FROM tecnico WHERE id = ?", (tecnico_id,)
+        ).fetchone()
+        if not tecnico or not _senha_confere(senha_atual, tecnico["senha_hash"], tecnico["senha_salt"]):
+            return False
+        senha_hash, senha_salt = _hash_senha(nova_senha)
+        conn.execute(
+            "UPDATE tecnico SET senha_hash = ?, senha_salt = ? WHERE id = ?",
+            (senha_hash, senha_salt, tecnico_id),
         )
         conn.commit()
         return conn.total_changes > 0
@@ -490,39 +549,60 @@ def listar_tickets(filtro_status: str | None = None) -> list[dict]:
         conn.close()
 
 
-def contagem_tickets_por_urgencia() -> dict[str, int]:
+def _filtro_cancelados(incluir_cancelados: bool) -> tuple[str, tuple]:
+    """Pedaço de JOIN + WHERE compartilhado pelas contagens do Dashboard, pra
+    opcionalmente excluir tickets cancelados sem duplicar a lógica em cada
+    função — ver o checkbox "Contar tickets cancelados" em tela_dashboard()."""
+    if incluir_cancelados:
+        return "", ()
+    return " JOIN status_ticket st ON t.status_atual_id = st.id WHERE st.nome != ?", (STATUS_CANCELADO,)
+
+
+def contagem_tickets_por_urgencia(incluir_cancelados: bool = True) -> dict[str, int]:
     """{urgencia: quantidade} pra todo o histórico de tickets — usado no
     Dashboard, que antes buscava a tabela inteira com listar_tickets() só pra
     contar linhas em pandas."""
     conn = _conectar()
     try:
-        cursor = conn.execute("SELECT urgencia_calculada, COUNT(*) AS quantidade FROM ticket GROUP BY urgencia_calculada")
+        filtro, parametros = _filtro_cancelados(incluir_cancelados)
+        cursor = conn.execute(
+            f"SELECT urgencia_calculada, COUNT(*) AS quantidade FROM ticket t{filtro} GROUP BY urgencia_calculada",
+            parametros,
+        )
         return {linha["urgencia_calculada"]: linha["quantidade"] for linha in cursor.fetchall()}
     finally:
         conn.close()
 
 
-def contagem_tickets_por_setor() -> dict[str, int]:
+def contagem_tickets_por_setor(incluir_cancelados: bool = True) -> dict[str, int]:
     conn = _conectar()
     try:
-        cursor = conn.execute("""
+        filtro, parametros = _filtro_cancelados(incluir_cancelados)
+        cursor = conn.execute(
+            f"""
             SELECT s.nome AS setor, COUNT(*) AS quantidade
-            FROM ticket t JOIN setor s ON t.setor_id = s.id
+            FROM ticket t JOIN setor s ON t.setor_id = s.id{filtro}
             GROUP BY s.nome
-        """)
+            """,
+            parametros,
+        )
         return {linha["setor"]: linha["quantidade"] for linha in cursor.fetchall()}
     finally:
         conn.close()
 
 
-def contagem_tickets_por_categoria() -> dict[str, int]:
+def contagem_tickets_por_categoria(incluir_cancelados: bool = True) -> dict[str, int]:
     conn = _conectar()
     try:
-        cursor = conn.execute("""
+        filtro, parametros = _filtro_cancelados(incluir_cancelados)
+        cursor = conn.execute(
+            f"""
             SELECT c.nome AS categoria, COUNT(*) AS quantidade
-            FROM ticket t JOIN categoria c ON t.categoria_atribuida_id = c.id
+            FROM ticket t JOIN categoria c ON t.categoria_atribuida_id = c.id{filtro}
             GROUP BY c.nome
-        """)
+            """,
+            parametros,
+        )
         return {linha["categoria"]: linha["quantidade"] for linha in cursor.fetchall()}
     finally:
         conn.close()

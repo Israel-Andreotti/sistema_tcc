@@ -203,6 +203,19 @@ def _fazer_logout_tecnico():
     st.session_state.pop("tecnico_logado", None)
 
 
+def _trocar_propria_senha_e_limpar():
+    tecnico_id = st.session_state["tecnico_logado"]["id"]
+    senha_atual = st.session_state.get("trocar_senha_atual", "")
+    nova_senha = st.session_state.get("trocar_senha_nova", "")
+    if backend_engine.alterar_propria_senha(tecnico_id, senha_atual, nova_senha):
+        st.session_state["trocar_senha_atual"] = ""
+        st.session_state["trocar_senha_nova"] = ""
+        st.session_state["trocar_senha_confirma"] = ""
+        st.toast("Senha alterada com sucesso.")
+    else:
+        st.toast("Senha atual incorreta.", icon="⚠️")
+
+
 def _abrir_ticket_e_limpar_formulario(opcoes_setor: dict):
     nome = st.session_state.get("abrir_nome", "").strip()
     ramal = st.session_state.get("abrir_ramal", "").strip()
@@ -366,7 +379,7 @@ def tela_painel():
                         st.rerun()
 
             st.divider()
-            st.markdown("**Notas de atendimento (procedimentos adotados)**")
+            st.markdown("**Notas de atendimento e procedimentos**")
             renderizar_notas(ticket["id"])
 
             st.caption(f"Nota será registrada em nome de **{nome_tecnico_logado}** (técnico logado).")
@@ -666,8 +679,9 @@ def _cadastrar_tecnico_e_limpar():
     nome = st.session_state.get("novo_tecnico_nome", "").strip()
     username = st.session_state.get("novo_tecnico_username", "").strip()
     senha = st.session_state.get("novo_tecnico_senha", "")
+    is_admin = st.session_state.get("novo_tecnico_admin", False)
 
-    novo_id = backend_engine.criar_tecnico(nome, username, senha)
+    novo_id = backend_engine.criar_tecnico(nome, username, senha, is_admin)
     if novo_id is None:
         st.toast("Não foi possível cadastrar o técnico. Verifique se o nome ou o usuário já existem.", icon="⚠️")
         return
@@ -676,6 +690,7 @@ def _cadastrar_tecnico_e_limpar():
     st.session_state["novo_tecnico_nome"] = ""
     st.session_state["novo_tecnico_username"] = ""
     st.session_state["novo_tecnico_senha"] = ""
+    st.session_state["novo_tecnico_admin"] = False
     st.toast(f"Técnico {nome} cadastrado com sucesso.")
 
 
@@ -683,10 +698,11 @@ def _cadastrar_tecnico_e_limpar():
 def tela_gerenciar_tecnicos():
     st.subheader("Cadastrar novo técnico")
 
-    col_nome, col_user, col_senha = st.columns(3)
+    col_nome, col_user, col_senha, col_admin = st.columns([3, 3, 3, 1])
     nome = col_nome.text_input("Nome", key="novo_tecnico_nome")
     username = col_user.text_input("Usuário (login)", key="novo_tecnico_username", placeholder="Ex: joao.silva")
     senha = col_senha.text_input("Senha inicial", type="password", key="novo_tecnico_senha")
+    col_admin.checkbox("Admin", key="novo_tecnico_admin")
 
     pode_cadastrar = bool(nome.strip()) and bool(username.strip()) and bool(senha)
     st.button(
@@ -697,10 +713,18 @@ def tela_gerenciar_tecnicos():
     st.divider()
     st.subheader("Técnicos cadastrados")
 
+    ocultar_inativos = st.checkbox("Ocultar técnicos inativos", value=True, key="tecnicos_ocultar_inativos")
+
     tecnicos = backend_engine.listar_tecnicos_completo()
     if not tecnicos:
         st.info("Nenhum técnico cadastrado ainda.")
         return
+
+    if ocultar_inativos:
+        tecnicos = [t for t in tecnicos if t["ativo"]]
+        if not tecnicos:
+            st.info("Nenhum técnico ativo — desmarque \"Ocultar técnicos inativos\" pra ver todos.")
+            return
 
     for tecnico in tecnicos:
         tecnico_id = tecnico["id"]
@@ -708,10 +732,12 @@ def tela_gerenciar_tecnicos():
 
         with st.container(key=f"tecnico_linha_{tecnico_id}"):
             if not st.session_state.get(editando_key, False):
-                col1, col2, col3 = st.columns([3, 3, 1])
+                col1, col2, col3, col4 = st.columns([3, 3, 1, 1])
                 col1.write(tecnico["nome"])
                 col2.write(f"@{tecnico['username']}" if tecnico["username"] else "_(sem login definido)_")
-                with col3:
+                papel = "👑 Admin" if tecnico["is_admin"] else "🔧 Técnico"
+                col3.write(papel if tecnico["ativo"] else f"{papel} · ❌ Inativo")
+                with col4:
                     if st.button("✏️", key=f"tecnico_edit_btn_{tecnico_id}"):
                         st.session_state[editando_key] = True
                         st.rerun()
@@ -721,20 +747,30 @@ def tela_gerenciar_tecnicos():
                 novo_username = st.text_input(
                     "Usuário", value=tecnico["username"] or "", key=f"editar_tecnico_username_{tecnico_id}"
                 )
+                col_admin, col_ativo = st.columns(2)
+                novo_admin = col_admin.checkbox("Admin", value=bool(tecnico["is_admin"]), key=f"editar_tecnico_admin_{tecnico_id}")
+                novo_ativo = col_ativo.checkbox(
+                    "Ativo", value=bool(tecnico["ativo"]), key=f"editar_tecnico_ativo_{tecnico_id}",
+                    help="Desmarque quando o funcionário sair da empresa: ele some do dropdown de atribuição "
+                         "e não consegue mais logar, mas o histórico de tickets dele é preservado.",
+                )
                 nova_senha = st.text_input(
-                    "Nova senha (deixe em branco para manter a atual)", type="password",
-                    key=f"editar_tecnico_senha_{tecnico_id}",
+                    "Redefinir senha (uso administrativo — recuperação de senha esquecida; "
+                    "deixe em branco para manter a atual)",
+                    type="password", key=f"editar_tecnico_senha_{tecnico_id}",
                 )
 
                 col_salvar, col_cancelar = st.columns(2)
                 if col_salvar.button("Salvar", key=f"btn_salvar_tecnico_{tecnico_id}", type="primary"):
-                    if backend_engine.atualizar_tecnico(tecnico_id, novo_nome.strip(), novo_username.strip()):
+                    if backend_engine.atualizar_tecnico(tecnico_id, novo_nome.strip(), novo_username.strip(), novo_admin, novo_ativo):
                         if nova_senha:
                             backend_engine.redefinir_senha_tecnico(tecnico_id, nova_senha)
                         listar_tecnicos_cache.clear()
                         st.session_state[editando_key] = False
                         st.success("Técnico atualizado.")
                         st.rerun()
+                    elif tecnico["is_admin"] and tecnico["ativo"] and (not novo_admin or not novo_ativo):
+                        st.error("Não é possível remover o último admin ativo do sistema.")
                     else:
                         st.error("Não foi possível atualizar. O nome ou o usuário podem já estar em uso.")
                 if col_cancelar.button("Cancelar", key=f"btn_cancelar_tecnico_{tecnico_id}"):
@@ -768,11 +804,13 @@ def tela_gerenciar_tecnicos():
 
 @st.fragment
 def tela_dashboard():
+    incluir_cancelados = st.checkbox("Contar tickets cancelados", value=True, key="dashboard_incluir_cancelados")
+
     # Consultas agregadas (COUNT + GROUP BY) direto no banco, em vez de trazer
     # a tabela inteira com listar_tickets() só pra contar linhas em pandas.
-    contagem_urg = backend_engine.contagem_tickets_por_urgencia()
-    contagem_setor = backend_engine.contagem_tickets_por_setor()
-    contagem_cat = backend_engine.contagem_tickets_por_categoria()
+    contagem_urg = backend_engine.contagem_tickets_por_urgencia(incluir_cancelados)
+    contagem_setor = backend_engine.contagem_tickets_por_setor(incluir_cancelados)
+    contagem_cat = backend_engine.contagem_tickets_por_categoria(incluir_cancelados)
 
     if not contagem_urg:
         st.info("Sem dados suficientes para o dashboard ainda.")
@@ -843,9 +881,32 @@ else:
         st.sidebar.success(f"Logado como **{tecnico_logado['nome']}**")
         st.sidebar.button("Sair", on_click=_fazer_logout_tecnico)
 
-        tab_abrir, tab_painel, tab_historico, tab_setores, tab_tecnicos, tab_dashboard = st.tabs(
-            ["Abrir Ticket", "Painel de Tickets", "Histórico", "Gerenciar Setores", "Gerenciar Técnicos", "Dashboard"]
-        )
+        with st.sidebar.expander("Trocar minha senha"):
+            st.text_input("Senha atual", type="password", key="trocar_senha_atual")
+            st.text_input("Nova senha", type="password", key="trocar_senha_nova")
+            st.text_input("Confirmar nova senha", type="password", key="trocar_senha_confirma")
+            pode_trocar_senha = (
+                bool(st.session_state.get("trocar_senha_atual"))
+                and bool(st.session_state.get("trocar_senha_nova"))
+                and st.session_state.get("trocar_senha_nova") == st.session_state.get("trocar_senha_confirma")
+            )
+            st.button(
+                "Confirmar troca", disabled=not pode_trocar_senha,
+                on_click=_trocar_propria_senha_e_limpar,
+            )
+
+        # Aba de gerenciamento de técnicos só é montada pra admins — técnico
+        # comum não deve nem ver que ela existe, não só ficar sem acesso.
+        nomes_abas = ["Abrir Ticket", "Painel de Tickets", "Histórico", "Gerenciar Setores"]
+        if tecnico_logado["is_admin"]:
+            nomes_abas.append("Gerenciar Técnicos")
+        nomes_abas.append("Dashboard")
+        abas = st.tabs(nomes_abas)
+
+        tab_abrir, tab_painel, tab_historico, tab_setores = abas[:4]
+        tab_tecnicos = abas[4] if tecnico_logado["is_admin"] else None
+        tab_dashboard = abas[-1]
+
         with tab_abrir:
             tela_abrir_ticket()
         with tab_painel:
@@ -854,7 +915,8 @@ else:
             tela_historico()
         with tab_setores:
             tela_gerenciar_setores()
-        with tab_tecnicos:
-            tela_gerenciar_tecnicos()
+        if tab_tecnicos is not None:
+            with tab_tecnicos:
+                tela_gerenciar_tecnicos()
         with tab_dashboard:
             tela_dashboard()
